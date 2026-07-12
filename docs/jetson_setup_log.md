@@ -117,10 +117,31 @@ ssh homin@100.79.110.90
 - `bridge_drone_ws/.claude/settings.local.json`(Jetson에만 있는 권한 allowlist)은 `.gitignore`에 추가해서 의도적으로 커밋 대상에서 제외.
 - **한 번 발견된 함정**: 이번에 처음 동기화하면서 보니 GitHub와 Jetson이 서로 반대 방향으로 밀려 있었음 — GitHub엔 `drone_core`/`lidar_mapping`/`web_dashboard`가 더 발전된 스켈레톤으로 있었는데 Jetson엔 반영 안 돼 있었고(특히 lidar_mapping/web_dashboard는 Jetson에 빈 폴더뿐), 반대로 Jetson의 카메라 캘리브레이션/`pixel_to_mm.py`/문서 최신본은 GitHub에 없었음. **앞으로 두 방향 중 하나로 무작정 덮어쓰지 말고, 매번 `git status`/diff로 양쪽 다 확인하고 동기화할 것.**
 
+## 2026-07-12 균열 데이터셋 조사
+
+목표: 탐지(detection) + mm 측정(measurement) 둘 다 하려면 어떤 공개 데이터셋을 쓸지 조사.
+
+**1. 바로 쓰기 좋은 것 — Ultralytics 공식 통합 세그멘테이션 데이터셋**
+- [Crack Segmentation Dataset (Ultralytics Docs)](https://docs.ultralytics.com/datasets/segment/crack-seg) — 4,029장, train/val/test 분리 완료, `ultralytics` 라이브러리에 이미 내장돼서 `data=crack-seg.yaml`만 지정하면 바로 학습 가능
+- 세그멘테이션(마스크) 포맷이라 바운딩박스보다 균열의 실제 윤곽을 잡기 좋음 — "측정"이 목표인 이 프로젝트엔 바운딩박스보다 유리 (마스크 윤곽선 두 끝점을 그대로 `vision_ai/measurement.py`의 `measure_distance_mm()`에 넣을 수 있음)
+
+**2. 학술 표준 데이터셋 (더 크고 다양함)**
+- [SDNET2018](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6247444/) — 56,000장+, 콘크리트 교량 바닥판/벽/포장, 균열 폭 0.06~25mm. **주의: 이건 바운딩박스/세그멘테이션이 아니라 256x256 패치 단위 "균열 있음/없음" 분류(classification) 데이터셋** — YOLO 탐지/세그멘테이션 학습에 그대로 섞어 쓸 수 없고, 별도 재라벨링하거나 사전학습(pretraining)/2차 필터링 용도로만 활용 가능
+- [DeepCrack](https://github.com/HqiTao/CT-crackseg) — 537장, 픽셀 단위 세그멘테이션 라벨 (정밀 측정용으로 적합, 다만 수량이 적음)
+- Crack500 / CrackTree206 / CFD — 도로 포장 균열 위주, 세그멘테이션 마스크 제공 (교량이 아니라 도로라 도메인이 약간 다름)
+
+**3. 드론 촬영 특화 (구조상 가장 유사한 케이스)**
+- [Crack-detection-public-dataset-collection (GitHub, 14개 정리)](https://github.com/Arthasyue/Crack-detection-public-dataset-collection) 중 **UAV-pdd2023**(드론 촬영 도로 결함), **HighRPD**(고고도 드론 포장 결함), **BCD**(교량 균열 전용) — 핸드헬드가 아니라 드론 시점이라 실제 D455F가 찍을 각도/거리와 유사. 다만 데이터 수가 상대적으로 적을 수 있음
+
+**4. Roboflow (바로 YOLO bbox 포맷)**
+- [Bridge crack (project-coxus)](https://universe.roboflow.com/project-coxus/bridge-crack-vczr8/dataset/1), [concrete surface crack (vijayalakshmi, 1,299장)](https://universe.roboflow.com/vijayalakshmi-2yshx/concrete-surface-crack-detection-using-yolov5-model/dataset/3) 등 — TXT+YAML로 바로 학습 가능, 다만 개별 규모가 작음(수백~수천 장)
+
+**결정 보류 — 다음에 정할 것**: 1번(crack-seg)으로 파이프라인부터 빠르게 검증 → 이후 3번(드론 앵글, BCD/UAV-pdd2023)으로 확장하는 순서 추천. 2번의 SDNET2018은 포맷이 달라(분류 전용) 바로 섞이지 않으니 별도 취급 필요.
+
 ## 다음에 이어서 할 것
 
 - [ ] 카메라를 실제 스캔 거리(수십 cm~수 m)에서 재테스트해서 `width_mm`/`height_mm`가 정상적으로 채워지는지 확인 — **보류 중 (2026-07-12 기준)**: 지금 집이라 Jetson/카메라가 학교에 있어서 물리적으로 카메라 위치를 옮길 수 없음. 학교 가서 재시도.
-- [ ] 균열 탐지 전용 YOLO 모델 학습 (지금은 COCO 일반 모델, 균열 데이터셋 없음 — 문서 8번 항목 5번)
+- [ ] 균열 탐지 전용 YOLO 모델 학습 (데이터셋 후보는 위 조사 완료 — crack-seg로 시작 → BCD/UAV-pdd2023로 확장 여부 결정 필요, 문서 8번 항목 5번)
 - [ ] 드론/라이다 준비되면: RPLIDAR A3, FC 연결 테스트 → `drone_core`(MAVROS), `lidar_mapping` 진행
 - [ ] `web_dashboard` 스켈레톤 만들기
 - [ ] 프로젝트 요약 문서(8번 항목)의 남은 미해결 설계 이슈들 — 2D-3D 태깅, GPS 음영구역 EKF, 센서 캘리브레이션(멀티센서 간) 등
