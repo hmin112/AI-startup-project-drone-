@@ -1,6 +1,7 @@
 import json
 import threading
 
+import cv2
 import numpy as np
 import pyrealsense2 as rs
 import rclpy
@@ -74,9 +75,10 @@ class VisionAiNode(Node):
 
                 results = model(color_image, device=0, verbose=False)
                 result = results[0]
+                masks_xy = result.masks.xy if result.masks is not None else [None] * len(result.boxes)
                 detections = [
-                    self._describe_detection(box, model.names, depth_frame, intrinsics, width, height)
-                    for box in result.boxes
+                    self._describe_detection(box, mask_xy, model.names, depth_frame, intrinsics, width, height)
+                    for box, mask_xy in zip(result.boxes, masks_xy)
                 ]
                 annotated = result.plot()
 
@@ -86,19 +88,51 @@ class VisionAiNode(Node):
         finally:
             pipeline.stop()
 
-    def _describe_detection(self, box, class_names, depth_frame, intrinsics, width, height):
+    def _describe_detection(self, box, mask_xy, class_names, depth_frame, intrinsics, width, height):
         x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
         x1, x2 = sorted((max(0, min(x1, width - 1)), max(0, min(x2, width - 1))))
         y1, y2 = sorted((max(0, min(y1, height - 1)), max(0, min(y2, height - 1))))
-        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+        if mask_xy is not None and len(mask_xy) >= 3:
+            length_mm, width_mm = self._measure_from_mask(mask_xy, depth_frame, intrinsics, width, height)
+        else:
+            length_mm, width_mm = self._measure_from_bbox(depth_frame, intrinsics, x1, y1, x2, y2)
 
         return {
             'class': class_names[int(box.cls[0])],
             'confidence': float(box.conf[0]),
             'bbox': [x1, y1, x2, y2],
-            'width_mm': self._safe_measure(depth_frame, intrinsics, (x1, cy), (x2, cy)),
-            'height_mm': self._safe_measure(depth_frame, intrinsics, (cx, y1), (cx, y2)),
+            'length_mm': length_mm,
+            'width_mm': width_mm,
         }
+
+    def _measure_from_mask(self, mask_xy, depth_frame, intrinsics, width, height):
+        # Cracks are long, thin, and diagonal, so an axis-aligned bbox
+        # over/under-estimates their true length/width. A rotated rect
+        # fitted to the mask's own contour follows the crack's orientation.
+        rect = cv2.minAreaRect(mask_xy.astype(np.float32))
+        corners = [
+            (int(np.clip(px, 0, width - 1)), int(np.clip(py, 0, height - 1)))
+            for px, py in cv2.boxPoints(rect)
+        ]
+        edge_a = self._safe_measure(depth_frame, intrinsics, corners[0], corners[1])
+        edge_b = self._safe_measure(depth_frame, intrinsics, corners[1], corners[2])
+        return self._longer_shorter(edge_a, edge_b)
+
+    def _measure_from_bbox(self, depth_frame, intrinsics, x1, y1, x2, y2):
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        edge_a = self._safe_measure(depth_frame, intrinsics, (x1, cy), (x2, cy))
+        edge_b = self._safe_measure(depth_frame, intrinsics, (cx, y1), (cx, y2))
+        return self._longer_shorter(edge_a, edge_b)
+
+    @staticmethod
+    def _longer_shorter(edge_a, edge_b):
+        edges = [e for e in (edge_a, edge_b) if e is not None]
+        if not edges:
+            return None, None
+        if len(edges) == 1:
+            return edges[0], None
+        return max(edges), min(edges)
 
     def _safe_measure(self, depth_frame, intrinsics, point_a, point_b):
         try:

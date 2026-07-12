@@ -138,10 +138,36 @@ ssh homin@100.79.110.90
 
 **결정 보류 — 다음에 정할 것**: 1번(crack-seg)으로 파이프라인부터 빠르게 검증 → 이후 3번(드론 앵글, BCD/UAV-pdd2023)으로 확장하는 순서 추천. 2번의 SDNET2018은 포맷이 달라(분류 전용) 바로 섞이지 않으니 별도 취급 필요.
 
+## 2026-07-12 균열 세그멘테이션 모델 학습 시도 (진행 중 문제 발생, 중단)
+
+목표: crack-seg 데이터셋으로 `yolov8n-seg` 100에포크 학습 → 추론 검증 → `vision_ai_node`를 세그멘테이션 기반 mm 측정으로 업그레이드.
+
+**코드 작업은 완료:**
+- `src/vision_ai/vision_ai/vision_ai_node.py`의 측정 로직을 bbox 축정렬 방식에서 **마스크 기반**으로 교체함. `result.masks.xy`(디텍션별 마스크 폴리곤)를 `cv2.minAreaRect()`에 넣어 균열 방향에 맞는 회전 사각형을 구하고, `cv2.boxPoints()`로 얻은 인접 두 변을 각각 `measurement.measure_distance_mm()`으로 mm 환산 → 더 긴 변을 `length_mm`, 짧은 변을 `width_mm`으로 JSON에 담음 (필드명이 `width_mm`/`height_mm`에서 `length_mm`/`width_mm`로 바뀜, 아직 소비자 없어서 하위호환 문제 없음). 마스크가 없는 모델(순수 detection)로 되돌릴 경우를 위해 기존 bbox 축정렬 방식 폴백도 유지. `colcon build` 성공까지 확인함.
+- 이 코드는 라이브 카메라로 직접 스모크테스트는 아직 못 했음 (아래 인시던트 때문에 미룸 — GPU/메모리를 학습이 다 쓰고 있어서 동시 실행 피함).
+
+**학습 시도 중 겪은 문제들 (시간순):**
+1. `yolo` CLI가 비대화형 SSH 세션 PATH에 없어서 처음 실행 실패 (`~/.local/bin`이 PATH에 없음) → `export PATH=$HOME/.local/bin:$PATH`로 해결
+2. `project=runs/segment`를 명시로 줬더니 ultralytics 설정의 기본 `runs_dir`("runs")와 겹쳐서 `runs/segment/runs/segment/crack_seg_v1`로 이중 중첩됨 → 이후 `project=`는 생략하고 `name=`만 지정하는 게 안전함 (기본값이 `runs/segment`라 그대로 깔끔하게 떨어짐)
+3. **에포크 1 완료 후 체크포인트 저장 단계에서 크래시**: `ModuleNotFoundError: No module named 'polars'` (ultralytics가 학습 결과 CSV 저장에 `polars`를 씀, 근데 안 깔려있었음). 에포크 1 자체는 정상 학습됨(val mAP50 0.242 box / 0.171 mask)인데 가중치 저장 전에 죽어서 `weights/`가 텅 빔 → `pip install --user polars`로 해결, 처음부터 재시작
+4. 재시작 후 에포크 1은 정상적으로 `best.pt`/`last.pt` 저장 확인, 에포크 2도 loss 정상 감소 확인
+5. **에포크 4 중반, 심각한 리소스 고갈 발생**: 배치 하나가 평소 ~1초에서 9분 넘게 걸리는 등 급격히 느려짐 → 확인해보니 RAM 7.1/7.4GB, **swap 3.7/3.7GB 완전히 소진**, load average 13 (Orin Nano 6코어 기준 과부하). 원인 추정: `yolo segment train`이 기본으로 dataloader worker 6개를 띄우는데, 각 worker가 RAM을 상당히 먹어서(worker당 대략 1GB 안팎) 8GB 통합 메모리에서 감당이 안 된 것으로 보임 (batch=8이 워커 수에 비해 과했을 수도 있음)
+6. 몇 분 뒤 **SSH 접속 자체가 완전히 타임아웃 나기 시작함** — sshd 핸드셰이크도 못 받을 만큼 시스템이 맛이 간 것으로 추정. 여러 차례 재시도(수 분간)했지만 재연결 실패. **이 로그를 쓰는 시점까지 Jetson이 계속 응답 없음.**
+
+**현재 상태 (2026-07-12 세션 종료 시점): Jetson 응답 없음, 미해결.** 백그라운드에서 1분 간격 재연결을 계속 시도하도록 해뒀지만, 완전히 멈춘(hard hang) 상태라면 소프트웨어적으로 복구 불가 — **학교 가서 Jetson 전원을 직접 확인/재부팅해야 할 수도 있음.**
+
+**다음 세션에서 이어서 할 것 (우선순위 순):**
+1. Jetson 전원 상태 확인 (필요시 재부팅) — 학교에서
+2. 재연결되면 `pgrep`으로 학습 프로세스/좀비 프로세스 정리, `free -h`로 메모리 상태 재확인
+3. 학습을 **`workers=2`**로 낮춰서 재시작 (메모리 여유 확보가 우선, 필요하면 `batch=4`까지 낮추는 것도 고려). 에포크 1개 도는 동안 `free -h`로 swap이 안정적인지 반드시 확인한 뒤에 그대로 100에포크 진행
+4. 학습 완료 후 계획대로: test set 검증 → `vision_ai_node` 라이브 스모크테스트 → 문서화 → 커밋/푸시
+
 ## 다음에 이어서 할 것
 
-- [ ] 카메라를 실제 스캔 거리(수십 cm~수 m)에서 재테스트해서 `width_mm`/`height_mm`가 정상적으로 채워지는지 확인 — **보류 중 (2026-07-12 기준)**: 지금 집이라 Jetson/카메라가 학교에 있어서 물리적으로 카메라 위치를 옮길 수 없음. 학교 가서 재시도.
-- [ ] 균열 탐지 전용 YOLO 모델 학습 (데이터셋 후보는 위 조사 완료 — crack-seg로 시작 → BCD/UAV-pdd2023로 확장 여부 결정 필요, 문서 8번 항목 5번)
+- [ ] **Jetson 응답 없음 문제 해결 (최우선)** — 학교 가서 전원 확인/재부팅 필요할 수 있음 (위 섹션 참고)
+- [ ] 균열 세그멘테이션 모델 학습 재시도 — `workers=2`로 낮춰서 재시작 (crack-seg, yolov8n-seg, 100에포크)
+- [ ] 카메라를 실제 스캔 거리(수십 cm~수 m)에서 재테스트해서 `width_mm`/`height_mm`가 정상적으로 채워지는지 확인 — **보류 중**: 지금 집이라 Jetson/카메라가 학교에 있어서 물리적으로 카메라 위치를 옮길 수 없음. 학교 가서 재시도.
+- [ ] 학습된 균열 모델 확보 후: BCD/UAV-pdd2023(드론 앵글)로 파인튜닝 확장 여부 결정
 - [ ] 드론/라이다 준비되면: RPLIDAR A3, FC 연결 테스트 → `drone_core`(MAVROS), `lidar_mapping` 진행
 - [ ] `web_dashboard` 스켈레톤 만들기
 - [ ] 프로젝트 요약 문서(8번 항목)의 남은 미해결 설계 이슈들 — 2D-3D 태깅, GPS 음영구역 EKF, 센서 캘리브레이션(멀티센서 간) 등
