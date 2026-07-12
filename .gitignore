@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 models/*.pt
 models/*.engine
+.claude/
