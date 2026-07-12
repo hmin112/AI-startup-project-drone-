@@ -109,9 +109,17 @@ ssh homin@100.79.110.90
 - **검증 결과**: `colcon build` 성공, 노드 기동 후 `/vision_ai/annotated` ~9.4Hz로 안정적 publish, `/vision_ai/detections`에서 키보드 탐지(`confidence` 0.83~0.86) JSON 정상 수신. 단, 이번 테스트에서는 카메라와 물체(키보드)가 너무 가까워서(D455F 최소 감지거리 이내로 추정 — depth 진단 스크립트로 bbox 중심·이미지 중심 모두 depth=0 확인) `width_mm`/`height_mm`는 계속 `null`로 나옴. **코드 버그 아니고 촬영 거리 문제** — mm 계산 로직 자체는 7/9에 이미 실측 검증됨(137.3mm vs 164.8mm 근사식 비교)
 - 코드는 GitHub(`hmin112/AI-startup-project-drone-`)에 커밋/푸시로 관리 시작 (그동안 로컬에만 있던 7/9~7/12 작업분도 이번에 처음 반영)
 
+## Git / GitHub 관리 방식 (2026-07-12부터)
+
+- 앞으로 작업은 GitHub `hmin112/AI-startup-project-drone-` (main 브랜치)에 꾸준히 커밋/푸시하며 관리. 레포 루트 = `bridge_drone_ws/` 내용물 그대로 (README.md, .gitignore, docs/, launch/, models/, src/).
+- **커밋/푸시는 Jetson이 아니라 맥에서 진행.** Jetson은 학교 공용 장비라 GitHub 인증(계정/토큰/SSH 키)을 일부러 넣어두지 않음. 맥 로컬 클론 경로: `~/Desktop/조선대학교/공모전/신기술 SW창업프로젝트/bridge_drone_ws` (`gh` CLI로 `hmin112` 계정 인증 완료된 상태).
+- 작업 흐름: 맥 클론에서 파일 작성/수정 → 해당 파일만 `scp`로 Jetson `~/bridge_drone_ws/`에 올려서 `colcon build`/실행으로 검증 → 맥 클론에서 `git add`/`commit`/`push`.
+- `bridge_drone_ws/.claude/settings.local.json`(Jetson에만 있는 권한 allowlist)은 `.gitignore`에 추가해서 의도적으로 커밋 대상에서 제외.
+- **한 번 발견된 함정**: 이번에 처음 동기화하면서 보니 GitHub와 Jetson이 서로 반대 방향으로 밀려 있었음 — GitHub엔 `drone_core`/`lidar_mapping`/`web_dashboard`가 더 발전된 스켈레톤으로 있었는데 Jetson엔 반영 안 돼 있었고(특히 lidar_mapping/web_dashboard는 Jetson에 빈 폴더뿐), 반대로 Jetson의 카메라 캘리브레이션/`pixel_to_mm.py`/문서 최신본은 GitHub에 없었음. **앞으로 두 방향 중 하나로 무작정 덮어쓰지 말고, 매번 `git status`/diff로 양쪽 다 확인하고 동기화할 것.**
+
 ## 다음에 이어서 할 것
 
-- [ ] 카메라를 실제 스캔 거리(수십 cm~수 m)에서 재테스트해서 `width_mm`/`height_mm`가 정상적으로 채워지는지 확인
+- [ ] 카메라를 실제 스캔 거리(수십 cm~수 m)에서 재테스트해서 `width_mm`/`height_mm`가 정상적으로 채워지는지 확인 — **보류 중 (2026-07-12 기준)**: 지금 집이라 Jetson/카메라가 학교에 있어서 물리적으로 카메라 위치를 옮길 수 없음. 학교 가서 재시도.
 - [ ] 균열 탐지 전용 YOLO 모델 학습 (지금은 COCO 일반 모델, 균열 데이터셋 없음 — 문서 8번 항목 5번)
 - [ ] 드론/라이다 준비되면: RPLIDAR A3, FC 연결 테스트 → `drone_core`(MAVROS), `lidar_mapping` 진행
 - [ ] `web_dashboard` 스켈레톤 만들기
