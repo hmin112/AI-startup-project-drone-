@@ -14,11 +14,20 @@
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #2a2f38; }
   th { color: #9ca3af; font-weight: 600; }
   #empty { color: #6b7280; padding: 16px 0; }
+  #camera { max-width: 100%; border-radius: 8px; border: 1px solid #2a2f38; margin-bottom: 20px; display: block; }
+  #camera-empty { color: #6b7280; margin-bottom: 20px; }
+  h2 { font-size: 1rem; color: #9ca3af; margin: 0 0 8px; }
 </style>
 </head>
 <body>
   <h1>Bridge Drone Dashboard</h1>
   <div id="status" class="disconnected">연결 중...</div>
+
+  <h2>실시간 카메라</h2>
+  <img id="camera" alt="실시간 카메라 화면">
+  <div id="camera-empty">아직 수신된 프레임이 없습니다.</div>
+
+  <h2>탐지 결과</h2>
   <table>
     <thead>
       <tr><th>class</th><th>confidence</th><th>length (mm)</th><th>width (mm)</th><th>bbox</th></tr>
@@ -31,7 +40,11 @@
   const statusEl = document.getElementById('status');
   const rowsEl = document.getElementById('rows');
   const emptyEl = document.getElementById('empty');
+  const cameraEl = document.getElementById('camera');
+  const cameraEmptyEl = document.getElementById('camera-empty');
   const WS_PORT = 8765;
+  cameraEl.style.display = 'none';
+  let lastFrameUrl = null;
 
   function connect() {
     const ws = new WebSocket(`ws://${location.hostname}:${WS_PORT}`);
@@ -47,6 +60,10 @@
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (event) => {
+      if (event.data instanceof Blob) {
+        renderFrame(event.data);
+        return;
+      }
       let detections;
       try {
         detections = JSON.parse(event.data);
@@ -55,6 +72,18 @@
       }
       render(detections);
     };
+  }
+
+  function renderFrame(blob) {
+    const url = URL.createObjectURL(blob);
+    const previousUrl = lastFrameUrl;
+    lastFrameUrl = url;
+    cameraEl.onload = () => {
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+    };
+    cameraEl.src = url;
+    cameraEl.style.display = 'block';
+    cameraEmptyEl.style.display = 'none';
   }
 
   function render(detections) {

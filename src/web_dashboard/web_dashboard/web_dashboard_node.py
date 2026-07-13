@@ -4,10 +4,16 @@ import os
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
+import cv2
 import rclpy
 import websockets
+from cv_bridge import CvBridge
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
 from std_msgs.msg import String
+
+JPEG_QUALITY = 80
 
 
 class WebDashboardNode(Node):
@@ -22,6 +28,7 @@ class WebDashboardNode(Node):
         self._clients = set()
         self._loop = None
         self._loop_ready = threading.Event()
+        self._bridge = CvBridge()
 
         self._ws_thread = threading.Thread(target=self._run_ws_server, daemon=True)
         self._ws_thread.start()
@@ -30,6 +37,9 @@ class WebDashboardNode(Node):
         self._http_server = self._start_http_server()
 
         self.create_subscription(String, '/vision_ai/detections', self._on_detections, 10)
+        self.create_subscription(
+            Image, '/vision_ai/annotated', self._on_annotated, qos_profile_sensor_data
+        )
 
         http_port = self.get_parameter('http_port').value
         ws_port = self.get_parameter('ws_port').value
@@ -67,6 +77,15 @@ class WebDashboardNode(Node):
         if not self._clients or self._loop is None:
             return
         asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)
+
+    def _on_annotated(self, msg):
+        if not self._clients or self._loop is None:
+            return
+        frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if not ok:
+            return
+        asyncio.run_coroutine_threadsafe(self._broadcast(buf.tobytes()), self._loop)
 
     async def _broadcast(self, payload):
         dead = set()

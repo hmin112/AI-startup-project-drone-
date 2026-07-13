@@ -1,5 +1,14 @@
+import json
+import threading
+
 import rclpy
+from geometry_msgs.msg import PoseStamped
+from mavros_msgs.msg import State
+from mavros_msgs.srv import CommandBool, SetMode
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from sensor_msgs.msg import BatteryState
+from std_msgs.msg import String
 
 
 class DroneCoreNode(Node):
@@ -8,11 +17,88 @@ class DroneCoreNode(Node):
     def __init__(self):
         super().__init__('drone_core_node')
 
-        # TODO: MAVROS 토픽 구독/발행 예정
-        # - 구독: /mavros/state, /mavros/local_position/pose 등
-        # - 발행: /mavros/setpoint_position/local 등
+        self.declare_parameter('setpoint_rate_hz', 20.0)
+
+        self._lock = threading.Lock()
+        self._state = State()
+        self._battery = BatteryState()
+        self._current_pose = PoseStamped()
+        self._target_pose = None  # None이면 현재 위치를 그대로 유지(hold)
+
+        mavros_qos = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
+
+        self.create_subscription(State, '/mavros/state', self._on_state, mavros_qos)
+        self.create_subscription(
+            PoseStamped, '/mavros/local_position/pose', self._on_local_position, mavros_qos
+        )
+        self.create_subscription(BatteryState, '/mavros/battery', self._on_battery, mavros_qos)
+
+        self._setpoint_pub = self.create_publisher(PoseStamped, '/mavros/setpoint_position/local', 10)
+        self._status_pub = self.create_publisher(String, '/drone_core/status', 10)
+
+        self._arming_client = self.create_client(CommandBool, '/mavros/cmd/arming')
+        self._set_mode_client = self.create_client(SetMode, '/mavros/set_mode')
+
+        setpoint_rate_hz = self.get_parameter('setpoint_rate_hz').value
+        self.create_timer(1.0 / setpoint_rate_hz, self._publish_setpoint)
+        self.create_timer(1.0, self._publish_status)
 
         self.get_logger().info('drone_core_node started')
+
+    def _on_state(self, msg):
+        with self._lock:
+            self._state = msg
+
+    def _on_local_position(self, msg):
+        with self._lock:
+            self._current_pose = msg
+
+    def _on_battery(self, msg):
+        with self._lock:
+            self._battery = msg
+
+    def set_target_pose(self, pose: PoseStamped):
+        """오프보드 setpoint 목표 갱신. 미션 로직(추후 구현)에서 호출."""
+        with self._lock:
+            self._target_pose = pose
+
+    def _publish_setpoint(self):
+        # PX4 OFFBOARD 모드는 setpoint가 일정 주기 이상 계속 발행돼야 유지되고,
+        # 스트림이 끊기면 자동으로 이전 모드로 폴백한다. 목표가 없으면 마지막으로
+        # 알려진 현재 위치를 그대로 다시 보내 제자리 유지(hold)한다.
+        with self._lock:
+            pose = self._target_pose or self._current_pose
+        pose.header.stamp = self.get_clock().now().to_msg()
+        self._setpoint_pub.publish(pose)
+
+    def _publish_status(self):
+        with self._lock:
+            state, battery = self._state, self._battery
+        status = {
+            'connected': state.connected,
+            'armed': state.armed,
+            'mode': state.mode,
+            'battery_percentage': battery.percentage,
+        }
+        self._status_pub.publish(String(data=json.dumps(status)))
+
+    def arm(self, value: bool = True):
+        """/mavros/cmd/arming 서비스 호출 (비동기, Future 반환)."""
+        if not self._arming_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn('arming service unavailable')
+            return None
+        request = CommandBool.Request()
+        request.value = value
+        return self._arming_client.call_async(request)
+
+    def set_mode(self, mode: str):
+        """/mavros/set_mode 서비스 호출 (비동기, Future 반환)."""
+        if not self._set_mode_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn('set_mode service unavailable')
+            return None
+        request = SetMode.Request()
+        request.custom_mode = mode
+        return self._set_mode_client.call_async(request)
 
 
 def main(args=None):
@@ -24,7 +110,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
