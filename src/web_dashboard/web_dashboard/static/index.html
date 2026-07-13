@@ -17,11 +17,27 @@
   #camera { max-width: 100%; border-radius: 8px; border: 1px solid #2a2f38; margin-bottom: 20px; display: block; }
   #camera-empty { color: #6b7280; margin-bottom: 20px; }
   h2 { font-size: 1rem; color: #9ca3af; margin: 0 0 8px; }
+  #drone-status { display: flex; gap: 16px; flex-wrap: wrap; background: #181d25; border: 1px solid #2a2f38;
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; font-size: 0.9rem; }
+  #drone-status .item { display: flex; gap: 6px; align-items: baseline; }
+  #drone-status .label { color: #9ca3af; }
+  #drone-status .value { font-weight: 600; }
+  #drone-status .value.ok { color: #4ade80; }
+  #drone-status .value.bad { color: #f87171; }
+  #drone-status .value.warn { color: #fbbf24; }
 </style>
 </head>
 <body>
   <h1>Bridge Drone Dashboard</h1>
   <div id="status" class="disconnected">연결 중...</div>
+
+  <h2>드론 상태</h2>
+  <div id="drone-status">
+    <div class="item"><span class="label">연결</span><span id="drone-connected" class="value bad">-</span></div>
+    <div class="item"><span class="label">Armed</span><span id="drone-armed" class="value">-</span></div>
+    <div class="item"><span class="label">모드</span><span id="drone-mode" class="value">-</span></div>
+    <div class="item"><span class="label">배터리</span><span id="drone-battery" class="value">-</span></div>
+  </div>
 
   <h2>실시간 카메라</h2>
   <img id="camera" alt="실시간 카메라 화면">
@@ -42,6 +58,10 @@
   const emptyEl = document.getElementById('empty');
   const cameraEl = document.getElementById('camera');
   const cameraEmptyEl = document.getElementById('camera-empty');
+  const droneConnectedEl = document.getElementById('drone-connected');
+  const droneArmedEl = document.getElementById('drone-armed');
+  const droneModeEl = document.getElementById('drone-mode');
+  const droneBatteryEl = document.getElementById('drone-battery');
   const WS_PORT = 8765;
   cameraEl.style.display = 'none';
   let lastFrameUrl = null;
@@ -64,14 +84,31 @@
         renderFrame(event.data);
         return;
       }
-      let detections;
+      let parsed;
       try {
-        detections = JSON.parse(event.data);
+        parsed = JSON.parse(event.data);
       } catch {
         return;
       }
-      render(detections);
+      if (Array.isArray(parsed)) {
+        render(parsed);
+      } else {
+        renderDroneStatus(parsed);
+      }
     };
+  }
+
+  function renderDroneStatus(status) {
+    droneConnectedEl.textContent = status.connected ? '연결됨' : '연결 안 됨';
+    droneConnectedEl.className = 'value ' + (status.connected ? 'ok' : 'bad');
+
+    droneArmedEl.textContent = status.armed ? 'ARMED' : 'disarmed';
+    droneArmedEl.className = 'value ' + (status.armed ? 'warn' : 'ok');
+
+    droneModeEl.textContent = status.mode || '-';
+
+    const pct = status.battery_percentage;
+    droneBatteryEl.textContent = (pct === null || pct === undefined) ? '-' : `${(pct * 100).toFixed(0)}%`;
   }
 
   function renderFrame(blob) {

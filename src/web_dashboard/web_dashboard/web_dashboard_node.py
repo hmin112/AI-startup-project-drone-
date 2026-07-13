@@ -40,6 +40,7 @@ class WebDashboardNode(Node):
         self.create_subscription(
             Image, '/vision_ai/annotated', self._on_annotated, qos_profile_sensor_data
         )
+        self.create_subscription(String, '/drone_core/status', self._on_drone_status, 10)
 
         http_port = self.get_parameter('http_port').value
         ws_port = self.get_parameter('ws_port').value
@@ -74,6 +75,11 @@ class WebDashboardNode(Node):
         return server
 
     def _on_detections(self, msg):
+        if not self._clients or self._loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)
+
+    def _on_drone_status(self, msg):
         if not self._clients or self._loop is None:
             return
         asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)
