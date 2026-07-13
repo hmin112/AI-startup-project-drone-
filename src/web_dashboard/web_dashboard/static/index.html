@@ -1,10 +1,80 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-  <meta charset="UTF-8">
-  <title>Bridge Drone Dashboard</title>
+<meta charset="UTF-8">
+<title>Bridge Drone Dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #12161c; color: #e6e6e6; margin: 0; padding: 24px; }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; }
+  #status { font-size: 0.85rem; margin-bottom: 16px; }
+  #status.connected { color: #4ade80; }
+  #status.disconnected { color: #f87171; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #2a2f38; }
+  th { color: #9ca3af; font-weight: 600; }
+  #empty { color: #6b7280; padding: 16px 0; }
+</style>
 </head>
 <body>
-  <h1>Bridge Drone Dashboard - Coming Soon</h1>
+  <h1>Bridge Drone Dashboard</h1>
+  <div id="status" class="disconnected">연결 중...</div>
+  <table>
+    <thead>
+      <tr><th>class</th><th>confidence</th><th>length (mm)</th><th>width (mm)</th><th>bbox</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty">아직 수신된 탐지 결과가 없습니다.</div>
+
+<script>
+  const statusEl = document.getElementById('status');
+  const rowsEl = document.getElementById('rows');
+  const emptyEl = document.getElementById('empty');
+  const WS_PORT = 8765;
+
+  function connect() {
+    const ws = new WebSocket(`ws://${location.hostname}:${WS_PORT}`);
+
+    ws.onopen = () => {
+      statusEl.textContent = '연결됨';
+      statusEl.className = 'connected';
+    };
+    ws.onclose = () => {
+      statusEl.textContent = '연결 끊김 - 재시도 중...';
+      statusEl.className = 'disconnected';
+      setTimeout(connect, 2000);
+    };
+    ws.onerror = () => ws.close();
+    ws.onmessage = (event) => {
+      let detections;
+      try {
+        detections = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      render(detections);
+    };
+  }
+
+  function render(detections) {
+    rowsEl.innerHTML = '';
+    emptyEl.style.display = detections.length ? 'none' : 'block';
+    for (const d of detections) {
+      const fmt = (v) => (v === null || v === undefined) ? '-' : (typeof v === 'number' ? v.toFixed(1) : v);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${fmt(d.class)}</td>
+        <td>${fmt(d.confidence)}</td>
+        <td>${fmt(d.length_mm)}</td>
+        <td>${fmt(d.width_mm)}</td>
+        <td>${(d.bbox || []).join(', ')}</td>
+      `;
+      rowsEl.appendChild(tr);
+    }
+  }
+
+  connect();
+</script>
 </body>
 </html>
