@@ -2,7 +2,8 @@ import json
 import threading
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
+import tf2_ros
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from mavros_msgs.msg import State
 from mavros_msgs.srv import CommandBool, SetMode
 from rclpy.node import Node
@@ -24,6 +25,7 @@ class DroneCoreNode(Node):
         self._battery = BatteryState()
         self._current_pose = PoseStamped()
         self._target_pose = None  # None이면 현재 위치를 그대로 유지(hold)
+        self._tf_broadcaster = tf2_ros.TransformBroadcaster(self)
 
         mavros_qos = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
 
@@ -52,6 +54,22 @@ class DroneCoreNode(Node):
     def _on_local_position(self, msg):
         with self._lock:
             self._current_pose = msg
+        # slam_toolbox는 odom->base_link를 독립적인 오도메트리 소스로 기대하고
+        # 그 위에 스캔매칭으로 map->odom 보정을 얹는다. GPS 음영구역(교량 하부)
+        # 대응을 위해 이 오도메트리는 FC 자체 EKF(local_position/pose, GPS 없이도
+        # IMU/광류/거리센서 등으로 로컬 추정)를 그대로 쓴다.
+        self._broadcast_odom_tf(msg)
+
+    def _broadcast_odom_tf(self, pose: PoseStamped):
+        transform = TransformStamped()
+        transform.header.stamp = pose.header.stamp
+        transform.header.frame_id = 'odom'
+        transform.child_frame_id = 'base_link'
+        transform.transform.translation.x = pose.pose.position.x
+        transform.transform.translation.y = pose.pose.position.y
+        transform.transform.translation.z = pose.pose.position.z
+        transform.transform.rotation = pose.pose.orientation
+        self._tf_broadcaster.sendTransform(transform)
 
     def _on_battery(self, msg):
         with self._lock:

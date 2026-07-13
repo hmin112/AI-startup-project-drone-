@@ -103,13 +103,13 @@ bridge_drone_ws/
 
 프로젝트명이 "균열 **탐지**"가 아니라 "결함 **측정**"이라는 점에서, 아래 항목들은 문서에 명시가 안 되어 있지만 실제 구현엔 꼭 필요해 보여요.
 
-1. **균열 크기 정량화 로직**: YOLO는 "여기 균열 있다"는 바운딩 박스만 줌. 실제 mm 단위 폭·길이를 재려면 D455F의 depth 정보 + 카메라 intrinsic을 이용해서 픽셀 거리를 실제 거리로 환산하는 별도 계산이 필요함. `vision_ai` 안에 이 로직이 있어야 하는데 아직 구조상 명시 안 됨.
+1. ~~**균열 크기 정량화 로직**~~ — **구현 완료(2026-07-12)**: `vision_ai/measurement.py`의 `measure_distance_mm()`이 D455F depth + intrinsic으로 픽셀 두 점을 3D 좌표로 변환해 실거리(mm) 계산. YOLO seg 모델의 마스크 윤곽에 `cv2.minAreaRect`를 적용해 균열 방향에 맞는 회전 사각형의 두 변을 `length_mm`/`width_mm`로 발행.
 
-2. **크랙 위치를 3D 맵에 정합(태깅)하는 로직**: `vision_ai`(2D 이미지상의 균열 위치)와 `lidar_mapping`(3D 포인트클라우드)은 지금 구조상 각자 독립 노드인데, "균열이 3D 맵의 어느 좌표에 있는지" 합치려면 두 결과를 정합하는 별도 처리(혹은 fusion 노드)가 필요함.
+2. **크랙 위치를 3D 맵에 정합(태깅)하는 로직**: `vision_ai`(2D 이미지상의 균열 위치)와 `lidar_mapping`(3D 포인트클라우드)은 지금 구조상 각자 독립 노드인데, "균열이 3D 맵의 어느 좌표에 있는지" 합치려면 두 결과를 정합하는 별도 처리(혹은 fusion 노드)가 필요함. **방향 결정(2026-07-13)**: 픽셀→카메라 3D좌표(1번의 `measure_distance_mm`이 이미 계산)→카메라-바디 extrinsic(4번, 미실측)→`odom→base_link` TF(아래 3번)로 월드좌표 변환→3D 맵에 태깅. fusion 노드 자체는 아직 미구현, extrinsic 실측이 선행돼야 함.
 
-3. **GPS 음영구역에서의 위치추정**: 다리 하부는 GPS 신호가 거의 안 잡히는 환경. 결국 SLAM 오도메트리가 유일한 위치 소스가 되는데, IMU + SLAM을 EKF로 융합하는 처리가 필요함 (드리프트 누적 문제도 고려해야 함).
+3. ~~**GPS 음영구역에서의 위치추정**~~ — **아키텍처 결정 및 부분 구현(2026-07-13)**: `slam_toolbox`(라이다 스캔매칭)가 `map→odom` 보정을 맡고, `drone_core`가 MAVROS `local_position/pose`(FC 자체 EKF — GPS 없이도 IMU/광류/거리센서 등으로 로컬 추정)를 `odom→base_link` TF로 발행하는 표준 nav2 구성 채택. `drone_core_node.py`에 TF 브로드캐스트 구현 및 합성 pose로 검증 완료, `launch/bridge_drone.launch.py`에 `async_slam_toolbox_node` 추가(`config/mapper_params_online_async.yaml`). RPLIDAR 미보유로 실제 스캔 기반 검증은 아직 못 함 — 드리프트 누적은 실측 후 평가 필요.
 
-4. **센서 캘리브레이션**: D455F, LiDAR, FC(IMU)가 서로 다른 위치에 장착되니, 좌표계를 맞추는 extrinsic calibration 작업이 선행되어야 함. 이거 없으면 위 2번(3D 태깅)이 부정확해짐.
+4. **센서 캘리브레이션**: D455F, LiDAR, FC(IMU)가 서로 다른 위치에 장착되니, 좌표계를 맞추는 extrinsic calibration 작업이 선행되어야 함. 이거 없으면 위 2번(3D 태깅)이 부정확해짐. `launch/bridge_drone.launch.py`에 `base_link→laser` static TF 자리는 만들어뒀지만 현재 값(z=0.1m)은 실측 전 임시값 — RPLIDAR 장착 후 갱신 필요. D455F↔`base_link` extrinsic은 아직 자리도 안 만듦.
 
 5. **YOLO 학습 데이터셋 구축**: 균열 이미지를 어디서 수집하고 어떻게 라벨링할지(공개 데이터셋 활용 여부, 직접 촬영 여부) 아직 안 정해짐.
 
