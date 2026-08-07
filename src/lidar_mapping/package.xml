@@ -3,13 +3,12 @@
 <package format="3">
   <name>lidar_mapping</name>
   <version>0.0.1</version>
-  <description>LiDAR SLAM, 센서 퓨전, 3D 포인트클라우드 맵 생성 패키지</description>
+  <description>D455F 기반 Visual SLAM(RTAB-Map) 상태 요약/중계 패키지</description>
   <maintainer email="yuna@ryukolab.top">yuna</maintainer>
   <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
-  <depend>sensor_msgs</depend>
-  <depend>nav_msgs</depend>
+  <depend>rtabmap_msgs</depend>
   <depend>std_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
