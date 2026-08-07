@@ -9,10 +9,10 @@ bridge_drone_ws/
 ├── src/
 │   ├── drone_core/       # MAVROS 통신, FC 제어 및 비행 상태 모니터링
 │   ├── vision_ai/        # RealSense D455F 연동, YOLO 기반 실시간 균열 탐지 추론
-│   ├── lidar_mapping/    # Visual SLAM(D455F 기반, LiDAR 제외 확정 2026-08-07 — RTAB-Map 등으로 재구현 예정, 현재 코드는 구 RPLIDAR 전제로 미반영), 센서 퓨전, 3D 포인트클라우드 맵 생성
+│   ├── lidar_mapping/    # D455F 기반 Visual SLAM(RTAB-Map) 상태 요약 — 실제 오도메트리/맵빌딩은 rtabmap_odom/rtabmap_slam(launch에서 직접 기동), 이 패키지는 /info 구독해서 /lidar_mapping/status만 발행
 │   └── web_dashboard/    # 분석 결과 및 3D 디지털 트윈 실시간 웹 시각화
 ├── launch/
-│   └── bridge_drone.launch.py  # 4개 노드를 한번에 실행
+│   └── bridge_drone.launch.py  # D455F 캡처(realsense2_camera) + drone_core/vision_ai/lidar_mapping/web_dashboard + RTAB-Map(rgbd_odometry, rtabmap) 전체 기동
 ├── models/                # 학습된 모델 가중치 (Git LFS 관리 예정)
 └── docs/                  # 문서
 ```

@@ -57,7 +57,7 @@
 
 - **drone_core**: MAVROS로 FC와 통신, 비행 상태 모니터링 및 제어 명령 전달.
 - **vision_ai**: D455F 영상을 받아 YOLO(TensorRT 가속)로 균열 탐지, 비동기 처리로 메인 스레드 블로킹 방지.
-- **lidar_mapping**: (이름은 유지하되) LiDAR 대신 **D455F 기반 Visual SLAM**(RTAB-Map 등 후보)으로 위치추정+3D 맵 생성. **하드웨어가 2026-08-07에 LiDAR 제외로 확정됐지만, 현재 코드(`lidar_mapping_node.py`)와 launch 구성은 아직 RPLIDAR `/scan`(LaserScan) + `slam_toolbox` 전제로 작성돼 있어 실물과 불일치 — Visual SLAM으로 재구현 필요(미착수, 8번 항목 3 참고).**
+- **lidar_mapping**: (이름은 유지) LiDAR 대신 **D455F 기반 Visual SLAM(RTAB-Map)**으로 위치추정+3D 맵 생성 — **구현 완료(2026-08-07)**. `rgbd_odometry`가 D455F 컬러+depth로 자체 Visual Odometry 계산(`odom→base_link` TF), `rtabmap`이 그 위에 루프클로징/맵빌딩(`map→odom` TF, `/map`) — `drone_core`/MAVROS엔 의존하지 않는 독립 오도메트리로 설계(8번 항목 3 참고). `lidar_mapping_node.py`는 이제 계산을 직접 하지 않고 `rtabmap`의 `/info` 토픽을 구독해 `/lidar_mapping/status`로 요약만 중계. 카메라(D455F) 캡처는 `vision_ai`와 공유하는 단일 지점(`realsense2_camera_node`)에서만 이뤄짐 — 두 프로세스가 동시에 디바이스를 여는 경합을 피하기 위해 `vision_ai_node`도 함께 리팩터링됨. **원격 세션이라 카메라가 정지된 채로만 검증됨 — 실제 이동/텍스처가 있어야 Visual Odometry가 추적되므로, `odom→base_link`/`map→odom` TF가 실제로 갱신되는지는 다음 하드웨어 세션에서 카메라를 손으로 움직이며 확인 필요.**
 - **web_dashboard**: 위 세 노드의 결과를 모아 로컬 웹서버로 실시간 시각화.
 
 노드가 독립된 이유: 한 노드가 죽어도(예: vision_ai 크래시) 다른 노드(특히 drone_core)는 영향받지 않아야 함 — 장애 격리.
@@ -110,9 +110,9 @@ bridge_drone_ws/
 
 2. **크랙 위치를 3D 맵에 정합(태깅)하는 로직**: `vision_ai`(2D 이미지상의 균열 위치)와 `lidar_mapping`(3D 포인트클라우드)은 지금 구조상 각자 독립 노드인데, "균열이 3D 맵의 어느 좌표에 있는지" 합치려면 두 결과를 정합하는 별도 처리(혹은 fusion 노드)가 필요함. **방향 결정(2026-07-13)**: 픽셀→카메라 3D좌표(1번의 `measure_distance_mm`이 이미 계산)→카메라-바디 extrinsic(4번, 미실측)→`odom→base_link` TF(아래 3번)로 월드좌표 변환→3D 맵에 태깅. fusion 노드 자체는 아직 미구현, extrinsic 실측이 선행돼야 함.
 
-3. **GPS 음영구역에서의 위치추정** — **재오픈(2026-08-07)**: 2026-07-13에 `slam_toolbox`(라이다 스캔매칭) + `drone_core`의 `odom→base_link` TF 조합으로 아키텍처를 정했었지만, **하드웨어가 LiDAR 제외로 확정되면서 라이다 스캔매칭 전제 자체가 무효화됨**. `drone_core`의 MAVROS `local_position/pose`→`odom→base_link` TF 부분은 그대로 유효(FC 자체 EKF는 GPS 없이도 동작), 하지만 `map→odom` 보정을 맡던 `slam_toolbox`(+ `/scan` 구독)는 **D455F 기반 Visual SLAM(RTAB-Map 등)으로 대체 필요** — 아직 미착수. `launch/bridge_drone.launch.py`의 `async_slam_toolbox_node`/`base_link→laser` static TF, `src/lidar_mapping/`의 `/scan` 구독 코드는 전부 이 재작업 대상.
+3. **GPS 음영구역에서의 위치추정** — **재구현 완료(2026-08-07)**: LiDAR 제외로 라이다 스캔매칭(`slam_toolbox`) 전제가 무효화되면서 재설계함. 원래 계획이던 `drone_core`(MAVROS `local_position/pose` 기반 `odom→base_link`) + 라이다 SLAM(`map→odom`) 조합 대신, **RTAB-Map이 `odom→base_link`(자체 Visual Odometry, `rgbd_odometry`)와 `map→odom`(맵빌딩+루프클로징, `rtabmap`) 둘 다 D455F만으로 전담**하도록 변경 — `drone_core`/MAVROS와 완전히 독립. 이유: 최종 FC가 **Betaflight**로 확정됐는데 Betaflight는 MAVROS와 정상 통신하지 않을 가능성이 높아서(`drone_core`가 실제로 pose 데이터를 못 받을 수 있음), 그 위에 SLAM을 얹는 원래 설계가 위험하다고 판단. **열린 문제**: 나중에 MAVROS/Betaflight 문제가 해결되면 `drone_core`와 `rgbd_odometry` 둘 다 `odom→base_link`를 쏘게 되는 충돌이 생김 — 그때 `drone_core`의 TF 발행을 없애거나 `robot_localization`으로 융합할지 결정 필요. **원격 세션이라 카메라 정지 상태로만 검증(파이프라인 크래시 없음, `/odom` 발행 확인, 메모리 안전 확인) — 실제 이동 중 TF 정상 갱신/드리프트는 미검증.**
 
-4. **센서 캘리브레이션**: 하드웨어 변경으로 LiDAR extrinsic은 더 이상 불필요해짐 — 남은 건 **D455F↔`base_link` extrinsic**(카메라 장착 위치/자세) 하나. 아직 실측도, launch에 자리도 안 만들어짐. 이거 없으면 위 2번(3D 태깅)이 부정확해짐.
+4. **센서 캘리브레이션**: 하드웨어 변경으로 LiDAR extrinsic은 더 이상 불필요해짐 — 남은 건 **D455F↔`base_link` extrinsic**(카메라 장착 위치/자세) 하나. `launch/bridge_drone.launch.py`에 `base_link→camera_link` static TF 자리는 만들어뒀지만(2026-08-07, 예전 `base_link→laser`와 같은 패턴) 현재 값(z=0.05m)은 실측 전 임시값. 이거 없으면 위 2번(3D 태깅)이 부정확해짐.
 
 5. **YOLO 학습 데이터셋 구축**: 균열 이미지를 어디서 수집하고 어떻게 라벨링할지(공개 데이터셋 활용 여부, 직접 촬영 여부) 아직 안 정해짐.
 
@@ -132,6 +132,7 @@ bridge_drone_ws/
 
 - rosbridge vs 커스텀 WebSocket 중 선택
 - 커버리지 그리드 해상도 (몇 cm/m 단위로 나눌지)
-- **`lidar_mapping`을 D455F 기반 Visual SLAM(RTAB-Map 등)으로 재구현** — LiDAR 제외 확정에 따른 최우선 재작업 (8번 항목 3)
+- **카메라를 실제로 움직이며 RTAB-Map 라이브 검증** (다음 하드웨어 세션 최우선) — `odom→base_link`/`map→odom` TF가 정상 갱신되는지, 루프클로저가 실제로 잡히는지, `vision_ai`와 동시 구동 시 GPU/메모리 여유 확인 (8번 항목 3)
 - 센서 fusion/캘리브레이션 담당자·일정 (D455F↔`base_link` extrinsic만 남음, 8번 항목 4)
 - ELRS 2.4GHz ↔ WiFi 2.4GHz 간섭 실측 일정 (8번 항목 7)
+- vision_ai 리팩터링 후 mm 측정 정확도 재검증(우드락 재실험 등) — 원격 세션이라 실물 없이는 확인 못함 (8번 항목 1)

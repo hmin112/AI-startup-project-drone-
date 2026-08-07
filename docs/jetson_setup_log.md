@@ -162,12 +162,109 @@ ssh homin@100.79.110.90
 3. 학습을 **`workers=2`**로 낮춰서 재시작 (메모리 여유 확보가 우선, 필요하면 `batch=4`까지 낮추는 것도 고려). 에포크 1개 도는 동안 `free -h`로 swap이 안정적인지 반드시 확인한 뒤에 그대로 100에포크 진행
 4. 학습 완료 후 계획대로: test set 검증 → `vision_ai_node` 라이브 스모크테스트 → 문서화 → 커밋/푸시
 
+## 2026-07-13 세션 — Jetson 복구, 학습 안전 재개, 3개 노드 스켈레톤 구현
+
+**Jetson 복구:** 학교에서 전원 재인가함 (재부팅, uptime 리셋 확인). 좀비 프로세스 없이 깨끗한 상태로 시작.
+
+**학습 안전 재개 체계 구축:**
+- 지난 세션에 남아있던 `last.pt`/`best.pt`(epoch 3까지)를 확인 → ultralytics는 매 epoch마다 체크포인트를 자동 저장하고 `resume=True model=last.pt`로 옵티마이저/LR 스케줄까지 그대로 이어받을 수 있음을 소스코드(`trainer.py`의 `check_resume`)로 확인. `workers`/`batch` 등은 resume 시에도 오버라이드 가능(허용 목록에 포함돼 있음).
+- `~/bridge_drone_ws/watchdog.sh` 작성: 30초마다 swap 사용률 체크, 80% 넘으면 학습 프로세스에 SIGTERM(15초 후 SIGKILL)을 보내 시스템 전체가 멎기 전에 먼저 학습만 죽임. `nohup setsid`로 학습/watchdog 둘 다 SSH 접속 종료와 무관하게 백그라운드 유지.
+- `workers=2 batch=8`로 epoch 4부터 resume. 이후 세션 중간에 카메라 테스트를 위해 두 차례 정지→재개(epoch 22, 23 지점)했고 매번 정상 이어짐. 이 로그를 쓰는 시점 기준 **epoch 41/100**, swap 52% 안정 (한때 32%→51%까지 오르다 멈췄음 — 정확한 원인 미상이나 80% 임계치 대비 여유 있어 계속 진행 중). mask mAP50 0.17(epoch1) → 0.61(epoch41)로 순조롭게 개선 중.
+- **주의**: `pgrep -f`로 학습 프로세스를 찾을 때 `nohup setsid <cmd> &` 형태로 띄운 경우 `kill -INT $(pgrep -f '패턴' | head -1)`이 launcher shell(bash) PID를 잡아서 실제 python 프로세스에 신호가 안 갈 수 있음 — 이번에 정지 실패로 한 번 걸림. 실제 python 프로세스 PID를 직접 지정해서 죽여야 확실함.
+
+**카메라 실측거리 재테스트 (학교, 실제 물체 대상):** 지난번 "너무 가까워서 depth=0 → mm값 항상 null"이었던 문제 해결 확인. 실측거리에서 다수 detection에 `length_mm` 실수값이 채워짐. 다만 일반 COCO 물체(의자 5.4m 등) 기준 bbox 방식 정확도는 여전히 들쭉날쭉 — 이는 7/9에 이미 실측 확인된 한계(bbox 변의 중점 두 점이 서로 다른 깊이/물체에 떨어지면 오차 60~70%+)이고, 실제 균열은 평면 위 얇고 긴 형태라 mask 기반(`cv2.minAreaRect`) 경로를 쓰므로 문제가 훨씬 적을 것으로 예상. 균열 전용 모델이 아직 학습 중이라 이번 테스트는 COCO 사전학습 모델(`yolov8n.pt`)로 mm 계산 파이프라인 자체만 검증.
+
+**`web_dashboard` 스켈레톤 구현 (신규):** ROS2 노드가 HTTP 서버(8080, `static/index.html` 서빙)와 WebSocket 서버(8765)를 백그라운드 스레드로 기동. `/vision_ai/detections`(탐지 배열)와 `/drone_core/status`(상태 객체)를 구독해 연결된 브라우저로 그대로 broadcast, `/vision_ai/annotated`는 JPEG 인코딩해서 바이너리 프레임으로 broadcast. 프론트엔드는 메시지가 배열이면 탐지 테이블, 객체면 드론 상태 배지(연결/armed/모드/배터리), 바이너리면 카메라 프레임으로 분기 렌더링 — 자동 재연결 포함. Jetson에서 실제 브라우저(`http://100.79.110.90:8080/`)로 열어서 실시간 갱신까지 육안 확인함. 합성 메시지로 각 경로(탐지/상태/이미지) 엔드투엔드 검증 완료.
+
+**`drone_core` MAVROS 로직 구현:** `ros-humble-mavros-msgs`(+`geographic-msgs`) 설치. `/mavros/state`, `local_position/pose`, `battery` 구독, `/drone_core/status` JSON 발행, **OFFBOARD 모드 유지를 위한 20Hz 연속 setpoint 스트림**(목표 없으면 현재 위치로 hold — PX4가 setpoint 스트림 끊기면 모드 이탈시키는 것 방지) 구현, `arm()`/`set_mode()` 비동기 서비스 클라이언트 추가. FC 미보유로 실비행 검증은 불가하나 import/빌드/status 발행/20Hz 스트림 안정성은 Jetson에서 확인.
+
+**`lidar_mapping` 스켈레톤 구현:** `/scan`(LaserScan) 구독, `/lidar_mapping/status`(연결여부/포인트 수/min-max range) 발행. 실제 SLAM(위치추정+맵생성)은 `slam_toolbox` launch 연동으로 나중에 붙일 예정(RPLIDAR A3 미보유라 미착수) — 이 노드는 원시 스캔 상태 집계까지만. 합성 LaserScan(360포인트, 240 유효)으로 검증.
+
+전부 GitHub에 커밋/푸시 완료.
+
+## 2026-07-13 세션 (계속) — GPS 음영구역 위치추정 아키텍처 + slam_toolbox 연동
+
+**주의 — apt install도 swap을 위험 수위까지 밀어올릴 수 있음:** `ros-humble-slam-toolbox` 설치 중 (rviz/nav2/boost-dev 등 의존성 대거 설치) swap이 2분 만에 54%→80%까지 치솟아 **watchdog이 실제로 발동, 학습 프로세스를 SIGTERM으로 안전하게 정지시킴** (epoch 43 체크포인트는 보존, 데이터 손실 없이 이후 정상 resume). 학습 중엔 무거운 apt 작업도 학습을 먼저 멈추고 하거나, 최소한 설치 직후 몇 분은 swap 추이를 반드시 확인할 것.
+
+**GPS 음영구역 위치추정 아키텍처 결정 및 구현:**
+- `slam_toolbox`(라이다 스캔매칭)가 `map→odom` 보정, `drone_core`가 MAVROS `local_position/pose`(FC 자체 EKF)를 `odom→base_link` TF로 발행 — GPS 없이 동작하는 표준 nav2 구성 채택
+- `drone_core_node.py`에 `tf2_ros.TransformBroadcaster` 추가, 합성 pose(1.5, -2.0, 3.2)로 TF가 정확히 반영되는 것까지 검증 (`ros2 run tf2_ros tf2_echo odom base_link`)
+- `launch/bridge_drone.launch.py`에 `base_link→laser` static TF(실측 전 임시값, z=0.1m)와 `async_slam_toolbox_node` 추가, `config/mapper_params_online_async.yaml` 신규 작성
+- RPLIDAR 미보유 + 학습 중 메모리 여유가 빠듯해서 slam_toolbox 자체를 실제로 띄워보진 않음 — launch 파일 문법 파싱과 executable 존재만 확인. **다음에 RPLIDAR 연결되면 최우선으로 라이브 검증할 것**
+- 2D→3D 균열 태깅 파이프라인 방향도 정리: 픽셀→카메라 3D(기존 `measure_distance_mm`) → 카메라-바디 extrinsic(미실측) → 이번에 만든 `odom→base_link` TF로 월드좌표 → 3D 맵 태깅. `docs/bridge_drone_project_summary.md` 8번 항목 갱신함.
+
+## 2026-07-13 세션 (계속) — 학습 완료, test set 검증, 크랙 모델 라이브 스모크테스트
+
+**학습 완료 (epoch 100/100, 총 두 번의 중단 후 재개 — 최초 OOM/행, apt 인시던트 — 둘 다 체크포인트로 무손실 복구):**
+- mask mAP50 0.649, mAP50-95 0.216 (epoch1: 0.171/0.048)
+- Git LFS 새로 셋업해서 `models/crack_seg_v1_yolov8n_seg.pt`로 GitHub에 커밋/푸시 (`results.csv`/`args.yaml`도 학습 기록으로 같이 올림)
+
+**Test set 검증 (112장, 148 인스턴스, 학습에 안 쓰인 홀드아웃):**
+- Box: precision 0.872, recall 0.644, mAP50 0.742
+- Mask: precision 0.774, recall 0.568, **mAP50 0.593**, mAP50-95 0.21
+- 추론 속도 18ms/이미지(GPU) — val(0.649)과 test(0.593) 차이가 크지 않아 과적합 징후 없음
+
+**`vision_ai_node` 크랙 모델 라이브 스모크테스트:**
+- 처음엔 depth 유효 픽셀이 프레임 전체의 16.7%뿐이라 mm값이 거의 다 null (163개 중 1개만 값 나옴) — 균열 자체 특성(얇음) 때문이 아니라 **그 순간 카메라 각도/장면이 depth 캡처에 안 좋았던 것**으로 확인 (진단 스크립트로 마스크 내부 depth 유효율까지 직접 측정해서 확인함)
+- 카메라를 평평한 벽면 위주로 재조정하니 마스크 내부 depth 유효율 95.4%까지 개선, 이후 재기동한 노드에서 243개 중 81개 detection에 실제 mm값 정상 계산됨 — **depth+측정 파이프라인 자체는 정상 확인**
+- 다만 실제 균열이 없는 사무실 환경이라 모델이 천장의 대각선 금속 레일을 "crack 0.36"으로 오탐(캡처 이미지: `crack_model_test_20260713.jpg`, 프로젝트 루트에 저장) — 길고 얇고 대각선인 시각 패턴이 학습한 균열 특징과 일치해서 나온 예상 가능한 오탐. **실제 정확도 검증은 진짜 균열 있는 현장에서 다시 해야 함** (기존에 알던 결론과 동일)
+
+## 2026-07-13 세션 (계속) — 우드락 실측 실험: 근접거리 depth 이중측정 문제 발견
+
+**목적**: 실제 균열이 없어서, 우드락에 자로 잰 정확한 길이(세로 5.5cm=55mm, 가로 폭 3~7mm)의 흠집을 칼로 내서 "실측값 대비 오차"를 정량 검증.
+
+**실험 1 — 카메라~우드락 약 50cm:**
+- 균열 위치를 확대+격자 오버레이 이미지로 정확히 픽셀좌표 특정 후 `measurement.measure_distance_mm()`으로 30프레임 반복 측정
+- 결과: depth가 약 0.94~0.98m로 읽힘 (실제 50cm의 거의 정확히 2배), 계산된 길이도 평균 108.3mm (실제 55mm의 약 1.97배)
+- **원인 추정**: D455F 공식 최소 인식거리(약 50~60cm) 근처/이하에서 스테레오 매칭이 disparity를 잘못 잡아 실제 거리를 약 2배로 과대측정하는 알려진 현상. 첫 프레임 하나에서는 균열 지점 depth가 아예 0(무효)으로 나온 적도 있었는데, 30프레임 반복해보니 29/30은 유효했음(단발성 무효는 그냥 프레임 노이즈, 2배 과대측정 쪽이 진짜 문제).
+
+**실험 2 — 카메라~우드락 약 1.4m (더 멀리 이동 후 재측정):**
+- 30/30 프레임 전부 유효, depth 약 1.39~1.40m로 일관됨
+- 계산된 길이: 평균 **59.1mm** (58.4~60.7mm) — 실제 55mm 대비 오차 **약 4.1mm (7.5%)**
+- 근접거리 문제였던 2배 과대측정이 사라지고 정확도가 실용적인 수준으로 회복됨
+
+**결론 (프로젝트 문서 8번 항목에도 반영):** 카메라-구조물 간 거리가 D455F 최소 인식거리 근처(~50cm 이하)면 depth가 실제 거리의 약 2배로 체계적으로 틀릴 수 있음이 실측으로 확인됨. **실제 비행/스캔 시 카메라-교량 구조물 간 최소 안전거리를 80cm~1m 이상으로 유지해야 함** — 이건 배터리/미션 플래닝(비행 경로, 접근 거리) 설계에 반영해야 하는 실측 제약사항.
+
+## 2026-08-07 세션 — 하드웨어 최종화 문서 반영
+
+RPLIDAR A3/TFmini/GPS 모듈 완전 제외, ELRS 915MHz→2.4GHz 변경, Jetson 전원 MATEK BEC12S-PRO 추가 등 하드웨어가 확정됨 (`docs/hardware_final_spec.md` 신규 작성). 자세한 내용은 그 문서와 `docs/bridge_drone_project_summary.md` 참고 — 이 세션의 핵심은 코드가 아니라 문서 반영이었음.
+
+## 2026-08-07 세션 (계속) — `lidar_mapping`을 D455F 기반 Visual SLAM(RTAB-Map)으로 재구현
+
+하드웨어 최종화로 RPLIDAR가 빠지면서 `lidar_mapping`/`launch`/`config`가 실물과 불일치하던 것을 해결. 전체 설계와 검증 결과는 `docs/bridge_drone_project_summary.md` 4번/8번 항목에 반영, 여기엔 구현 과정에서 겪은 실무 디테일만 기록.
+
+**단일 캡처 지점 도입 (`realsense2_camera`):**
+- `ros-humble-realsense2-camera`(4.58.2)를 apt로 설치 — arm64 패키지가 존재해서 D455F용 librealsense를 소스에서 다시 빌드할 필요 없었음(기존 `~/librealsense` 소스 설치와 별도 경로라 충돌도 없음, `apt-get install --dry-run`으로 사전 확인).
+- **파라미터명 실측 확인**: 이 버전에서 해상도 지정은 `depth_module.profile`/`rgb_camera.profile`이 아니라 **`depth_module.depth_profile`/`rgb_camera.color_profile`** (구버전 realsense-ros와 다름) — `ros2 param list`로 실제 노드에 물어봐서 확인. 이 이름으로 지정해야 기존 `vision_ai`의 수동 pyrealsense2 설정과 동일한 depth 1280x720 / color 1280x800 @30fps가 나옴.
+- 토픽 네임스페이스는 기본적으로 `/camera/camera/...`로 중첩됨(namespace='camera' name='camera' 조합) — realsense-ros 4.x의 기본 동작, 그대로 채택.
+- `vision_ai_node.py`를 리팩터링해서 더 이상 `pyrealsense2`로 디바이스를 직접 열지 않고 `message_filters.ApproximateTimeSynchronizer`로 컬러+depth 토픽을 구독하도록 변경. `measurement.py`의 3D 역투영 수학 자체는 그대로 두고, depth 조회만 `depth_frame.get_distance()`(라이브 디바이스 필요)에서 raw depth 배열 + `depth_scale`로 바꿈 — `rs.intrinsics()`는 `CameraInfo`(K 행렬)로 수동 구성.
+- 젯슨에서 합성 핀홀 케이스로 수학 검증(65px 간격, fx=650, depth=1m → 예상 100mm, 실제 100.00mm) — 리팩터링이 계산 로직을 깨지 않았음을 확인. 실제 카메라로도 크래시 없이 `/vision_ai/annotated` ~9Hz 발행까지 확인했지만, **원격 세션이라 알려진 크기 물체로 mm 정확도 재검증(우드락 재실험 등)은 못함 — 다음 하드웨어 세션 필요.**
+
+**RTAB-Map 통합 (`rtabmap_odom`/`rtabmap_slam`):**
+- `ros-humble-rtabmap-ros`(0.23.7) 설치 중 `Hash Sum mismatch` 발생 — 7/9에 기록한 조선대 캠퍼스 네트워크 필터링 문제와 동일 패턴(`packages.ros.org`), **재시도 2번째 만에 성공**. 이 문제 재발 시 필터부터 의심할 것(계속 유효한 교훈).
+- `rgbd_odometry`(자체 Visual Odometry, `odom→base_link` TF+`/odom` 발행)와 `rtabmap`(그 위에 맵빌딩/루프클로징, `map→odom` TF+`/map`) 조합 채택, `drone_core`/MAVROS 완전히 독립 — 이유는 `docs/bridge_drone_project_summary.md` 8번 항목 3 참고(Betaflight FC가 MAVROS와 정상 통신 안 할 가능성).
+- 두 노드의 기본 구독/발행 토픽명을 실제로 띄워서 확인(`ros2 node info`) — `rgbd_odometry`는 `/rgb/image`, `/depth/image`, `/rgb/camera_info` 구독, `rtabmap`은 그 위에 `/odom`까지 추가로 구독. `-d`(DB 초기화) 플래그는 `--ros-args` **앞에** 와야 함 — 뒤에 두면 `UnknownROSArgsError`로 크래시(수동 CLI 테스트 중 실수로 겪음, launch파일의 `arguments=[...]`는 launch_ros가 알아서 순서를 맞춰주므로 이 문제 없음).
+- `base_link→laser` static TF를 `base_link→camera_link`로 교체(실측 전 placeholder, z=0.05m). `realsense2_camera_node`가 `camera_link→camera_color_optical_frame` 체인을 자체 발행하는 것을 `tf2_echo`로 확인해서, `base_link→camera_link` 하나만 있으면 체인이 완성됨을 검증.
+- **7개 노드(카메라, rgbd_odometry, rtabmap, vision_ai, drone_core, lidar_mapping, web_dashboard) 동시 기동 검증**: 크래시 없음, `/odom` 발행 확인, 메모리 안전(swap 거의 안 늚 — 7/12의 학습 OOM 인시던트 같은 문제 재발 안 함, YOLO 동시 구동해도 문제없었음).
+- **한계 (원격 세션의 근본적 제약)**: 카메라가 젯슨에 고정된 채 정지 상태라 `rgbd_odometry`의 `quality`가 거의 계속 0(추적 실패/"lost")으로 나옴 → `rtabmap`이 "no odometry is provided, Image 0 is ignored" 에러를 반복 — **이건 코드 버그가 아니라 Visual Odometry의 근본적 특성(움직임+텍스처 필요)** 때문. `odom→base_link`/`map→odom` TF가 실제로 갱신되는지, 루프클로저가 잡히는지는 카메라를 손으로 움직이는 실측이 있어야 확인 가능 — **다음 하드웨어 세션 최우선 항목.**
+
+**`lidar_mapping_node.py` 재작성:** `/scan` 대신 `rtabmap`의 `/info`(`rtabmap_msgs/Info`) 구독으로 전환, `/lidar_mapping/status`(connected + map_node_count + loop_closure 카운트) 발행은 기존 계약 유지. 정상 빌드/구독 확인, `connected:false`(아직 `/info` 발행 전) 정상 출력 확인.
+
+전부 GitHub에 커밋/푸시 완료(단계별로 4개 커밋으로 분리).
+
 ## 다음에 이어서 할 것
 
-- [ ] **Jetson 응답 없음 문제 해결 (최우선)** — 학교 가서 전원 확인/재부팅 필요할 수 있음 (위 섹션 참고)
-- [ ] 균열 세그멘테이션 모델 학습 재시도 — `workers=2`로 낮춰서 재시작 (crack-seg, yolov8n-seg, 100에포크)
-- [ ] 카메라를 실제 스캔 거리(수십 cm~수 m)에서 재테스트해서 `width_mm`/`height_mm`가 정상적으로 채워지는지 확인 — **보류 중**: 지금 집이라 Jetson/카메라가 학교에 있어서 물리적으로 카메라 위치를 옮길 수 없음. 학교 가서 재시도.
-- [ ] 학습된 균열 모델 확보 후: BCD/UAV-pdd2023(드론 앵글)로 파인튜닝 확장 여부 결정
-- [ ] 드론/라이다 준비되면: RPLIDAR A3, FC 연결 테스트 → `drone_core`(MAVROS), `lidar_mapping` 진행
-- [ ] `web_dashboard` 스켈레톤 만들기
-- [ ] 프로젝트 요약 문서(8번 항목)의 남은 미해결 설계 이슈들 — 2D-3D 태깅, GPS 음영구역 EKF, 센서 캘리브레이션(멀티센서 간) 등
+- [x] ~~Jetson 응답 없음 문제 해결~~ — 전원 재인가로 복구, watchdog으로 재발 방지
+- [x] ~~균열 세그멘테이션 학습~~ — epoch 100 완료, test set 검증까지 끝남 (mask mAP50 0.593)
+- [x] ~~카메라 실측거리 재테스트~~ — depth null 문제 해결 확인
+- [x] ~~mask 기반 measurement 라이브 검증~~ — depth 유효한 장면에서 정상 작동 확인
+- [x] ~~측정 정확도 실측 검증(우드락)~~ — 완료: 1.4m 거리에서 7.5% 오차 확인, 단 50cm 근접시 2배 과대측정 문제 발견
+- [x] ~~`web_dashboard` 스켈레톤 만들기~~ — 완료 (탐지 테이블 + 카메라 스트리밍 + 드론 상태 배지)
+- [x] ~~하드웨어 최종화 (RPLIDAR/TFmini/GPS 제외, ELRS 2.4GHz, BEC 추가)~~ — 2026-08-07 확정, 문서 반영 완료
+- [x] ~~`lidar_mapping`을 D455F 기반 Visual SLAM(RTAB-Map)으로 재구현~~ — 2026-08-07 완료, 구조적 검증까지 끝남
+- [ ] **카메라를 실제로 움직이며 RTAB-Map 라이브 검증 (최우선, 다음 하드웨어 세션)** — TF 갱신/루프클로저/드리프트, 위 "한계" 참고
+- [ ] **vision_ai mm 측정 정확도 재검증(우드락 재실험 등)** — 카메라 캡처 리팩터링(단일화) 이후 아직 실물로 확인 못함
+- [ ] 실제 균열 있는 현장에서 재검증 — 우드락 실험은 인공 흠집이라 참고용. 최소 80cm~1m 거리 유지 필수
+- [ ] 학습된 균열 모델로 BCD/UAV-pdd2023(드론 앵글) 파인튜닝 확장 여부 결정
+- [ ] 드론/RPLIDAR는 최종 제외됐지만, FC(Betaflight) 연결 테스트는 여전히 필요 — 단 `drone_core`/MAVROS 문제(위 참고)부터 정리해야 의미 있음
+- [ ] 남은 미해결 설계 이슈 — D455F↔`base_link` extrinsic 실측, 배터리/미션 플래닝(최소거리 제약 반영), ELRS 2.4GHz/WiFi 간섭 실측(우선순위 상승), 온보드 저장용량 산정
