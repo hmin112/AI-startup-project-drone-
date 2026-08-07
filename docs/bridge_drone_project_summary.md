@@ -6,7 +6,9 @@
 
 ## 1. 프로젝트 한 줄 요약
 
-드론이 교량 하부를 비행하며 카메라·LiDAR로 구조물을 스캔 → 온보드 AI(Jetson)가 실시간으로 균열을 탐지·측정 → 결과를 3D 지도 위에 매핑해서 웹 대시보드로 시각화하는 시스템.
+드론이 교량 하부를 비행하며 카메라(RealSense D455F)로 구조물을 스캔 → 온보드 AI(Jetson)가 실시간으로 균열을 탐지·측정 → 결과를 3D 지도 위에 매핑해서 웹 대시보드로 시각화하는 시스템.
+
+**하드웨어 최종화(2026-08-07)**: LiDAR(RPLIDAR A3) 제외 확정 — D455F 단독으로 Visual SLAM까지 겸용. 자세한 변경 이력은 `docs/hardware_final_spec.md` 참고.
 
 핵심은 "탐지"에서 끝나지 않고 **"측정"**까지 가야 한다는 점 — 이 부분은 아래 11번에서 다시 짚음.
 
@@ -16,15 +18,16 @@
 
 | 부품 | 역할 |
 |---|---|
-| F405 FC (INAV/ArduPilot) | 비행 자세 제어, 모터 구동 |
-| Jetson Orin Nano | 온보드 AI 컴퓨터. YOLO 추론, SLAM, 웹서버 실행 |
-| RealSense D455F | AI 균열 탐지용 RGB-D 카메라 (조종용 FPV 카메라와는 별개!) |
-| RPLIDAR A3 | 2D 스캐닝 라이다, SLAM/3D 매핑용 |
-| TFmini | 단일 지점 거리 센서, 주로 고도 측정·장애물 감지용 |
-| FPV 카메라 + VTX (2.5W) | 조종자가 실시간으로 보는 1인칭 시점 영상 (5.8GHz 아날로그/디지털) |
-| RC 조종기 (915MHz ELRS) | 사람이 직접 조종하는 저지연 제어 채널 |
+| YSIDO F405 V3 FC + 60A 4-in-1 ESC (Betaflight) | 비행 자세 제어, 모터 구동 |
+| Jetson Orin Nano (MATEK BEC12S-PRO로 12V 전원) | 온보드 AI 컴퓨터. YOLO 추론, SLAM, 웹서버 실행 |
+| RealSense D455F | AI 균열 탐지용 RGB-D 카메라 (조종용 FPV 카메라와는 별개!) + **Visual SLAM 겸용(LiDAR 대체)** |
+| ~~RPLIDAR A3~~ | **제외(2026-08-07 확정)** — D455F 단독으로 Visual SLAM 처리, 무게/비용 절감 |
+| ~~TFmini~~ | **제외(2026-08-07 확정)** — 고도유지는 FC 내장 기압계(BMP280), 근접경고는 D455F depth, Failsafe는 Land 모드로 대체 |
+| GPS 모듈 | **미사용 확정** — 교량 하부 GPS 음영구역이라 실효성 없음, 위치추정은 SLAM이 전담 |
+| FPV 카메라 + VTX (2.5W, 4.9/5.8GHz) | 조종자가 실시간으로 보는 1인칭 시점 영상 |
+| RC 조종기 (RadioMaster Pocket) + ExpressLRS Nano RX **2.4GHz** | 사람이 직접 조종하는 저지연 제어 채널 (원래 915MHz 계획이었으나 조종기 내장 RF가 2.4GHz 전용이라 변경, 아래 3번 간섭 이슈 참고) |
 
-**중요한 구분**: 이 드론엔 카메라가 사실상 두 개예요 — 사람이 보는 FPV 카메라(조종용)와 AI가 처리하는 D455F(측정용). 서로 완전히 분리된 파이프라인.
+**중요한 구분**: 이 드론엔 카메라가 사실상 두 개예요 — 사람이 보는 FPV 카메라(조종용)와 AI가 처리하는 D455F(측정용/SLAM용). 서로 완전히 분리된 파이프라인.
 
 ---
 
@@ -32,8 +35,8 @@
 
 같은 "무선"이어도 목적이 전혀 다른 3개 채널이 동시에 존재함.
 
-1. **ELRS (915MHz)**: RC 조종기 → FC. 저지연 필수, 소량의 조종 데이터.
-2. **VTX (5.8GHz)**: FPV 카메라 → 고글/모니터. 실시간 영상 전용 채널, WiFi와 무관.
+1. **ELRS (2.4GHz, 2026-08-07부터 — 원래 915MHz 계획에서 변경)**: RC 조종기 → FC. 저지연 필수, 소량의 조종 데이터. **주의**: 아래 3번 WiFi와 같은 2.4GHz 대역이라 근거리에서 서로 간섭할 가능성이 915MHz 때보다 커짐 — 8번 열린 이슈 7번 참고.
+2. **VTX (4.9/5.8GHz)**: FPV 카메라 → 고글/모니터. 실시간 영상 전용 채널, WiFi와 무관.
 3. **WiFi/텔레메트리**: Jetson ↔ 노트북. AI 결과·상태 데이터 전송용. `web_dashboard`가 여기 해당.
 
 **"웹" 대시보드는 인터넷이 아니라 로컬 네트워크**임에 유의. Jetson이 자체 WiFi 핫스팟을 띄우거나(hostapd), 지상 공유기에 둘 다 붙는 방식.
@@ -49,12 +52,12 @@
 ```
 [F405 FC] --MAVROS--> [drone_core]   ---\
 [D455F]   --------->  [vision_ai]    ----> [web_dashboard] --WiFi--> [노트북 브라우저]
-[LiDAR]   --------->  [lidar_mapping]---/
+[D455F]   --------->  [lidar_mapping]---/
 ```
 
 - **drone_core**: MAVROS로 FC와 통신, 비행 상태 모니터링 및 제어 명령 전달.
 - **vision_ai**: D455F 영상을 받아 YOLO(TensorRT 가속)로 균열 탐지, 비동기 처리로 메인 스레드 블로킹 방지.
-- **lidar_mapping**: LiDAR 데이터로 SLAM 수행, 3D 포인트클라우드 맵 생성 (Open3D 활용).
+- **lidar_mapping**: (이름은 유지하되) LiDAR 대신 **D455F 기반 Visual SLAM**(RTAB-Map 등 후보)으로 위치추정+3D 맵 생성. **하드웨어가 2026-08-07에 LiDAR 제외로 확정됐지만, 현재 코드(`lidar_mapping_node.py`)와 launch 구성은 아직 RPLIDAR `/scan`(LaserScan) + `slam_toolbox` 전제로 작성돼 있어 실물과 불일치 — Visual SLAM으로 재구현 필요(미착수, 8번 항목 3 참고).**
 - **web_dashboard**: 위 세 노드의 결과를 모아 로컬 웹서버로 실시간 시각화.
 
 노드가 독립된 이유: 한 노드가 죽어도(예: vision_ai 크래시) 다른 노드(특히 drone_core)는 영향받지 않아야 함 — 장애 격리.
@@ -107,17 +110,21 @@ bridge_drone_ws/
 
 2. **크랙 위치를 3D 맵에 정합(태깅)하는 로직**: `vision_ai`(2D 이미지상의 균열 위치)와 `lidar_mapping`(3D 포인트클라우드)은 지금 구조상 각자 독립 노드인데, "균열이 3D 맵의 어느 좌표에 있는지" 합치려면 두 결과를 정합하는 별도 처리(혹은 fusion 노드)가 필요함. **방향 결정(2026-07-13)**: 픽셀→카메라 3D좌표(1번의 `measure_distance_mm`이 이미 계산)→카메라-바디 extrinsic(4번, 미실측)→`odom→base_link` TF(아래 3번)로 월드좌표 변환→3D 맵에 태깅. fusion 노드 자체는 아직 미구현, extrinsic 실측이 선행돼야 함.
 
-3. ~~**GPS 음영구역에서의 위치추정**~~ — **아키텍처 결정 및 부분 구현(2026-07-13)**: `slam_toolbox`(라이다 스캔매칭)가 `map→odom` 보정을 맡고, `drone_core`가 MAVROS `local_position/pose`(FC 자체 EKF — GPS 없이도 IMU/광류/거리센서 등으로 로컬 추정)를 `odom→base_link` TF로 발행하는 표준 nav2 구성 채택. `drone_core_node.py`에 TF 브로드캐스트 구현 및 합성 pose로 검증 완료, `launch/bridge_drone.launch.py`에 `async_slam_toolbox_node` 추가(`config/mapper_params_online_async.yaml`). RPLIDAR 미보유로 실제 스캔 기반 검증은 아직 못 함 — 드리프트 누적은 실측 후 평가 필요.
+3. **GPS 음영구역에서의 위치추정** — **재오픈(2026-08-07)**: 2026-07-13에 `slam_toolbox`(라이다 스캔매칭) + `drone_core`의 `odom→base_link` TF 조합으로 아키텍처를 정했었지만, **하드웨어가 LiDAR 제외로 확정되면서 라이다 스캔매칭 전제 자체가 무효화됨**. `drone_core`의 MAVROS `local_position/pose`→`odom→base_link` TF 부분은 그대로 유효(FC 자체 EKF는 GPS 없이도 동작), 하지만 `map→odom` 보정을 맡던 `slam_toolbox`(+ `/scan` 구독)는 **D455F 기반 Visual SLAM(RTAB-Map 등)으로 대체 필요** — 아직 미착수. `launch/bridge_drone.launch.py`의 `async_slam_toolbox_node`/`base_link→laser` static TF, `src/lidar_mapping/`의 `/scan` 구독 코드는 전부 이 재작업 대상.
 
-4. **센서 캘리브레이션**: D455F, LiDAR, FC(IMU)가 서로 다른 위치에 장착되니, 좌표계를 맞추는 extrinsic calibration 작업이 선행되어야 함. 이거 없으면 위 2번(3D 태깅)이 부정확해짐. `launch/bridge_drone.launch.py`에 `base_link→laser` static TF 자리는 만들어뒀지만 현재 값(z=0.1m)은 실측 전 임시값 — RPLIDAR 장착 후 갱신 필요. D455F↔`base_link` extrinsic은 아직 자리도 안 만듦.
+4. **센서 캘리브레이션**: 하드웨어 변경으로 LiDAR extrinsic은 더 이상 불필요해짐 — 남은 건 **D455F↔`base_link` extrinsic**(카메라 장착 위치/자세) 하나. 아직 실측도, launch에 자리도 안 만들어짐. 이거 없으면 위 2번(3D 태깅)이 부정확해짐.
 
 5. **YOLO 학습 데이터셋 구축**: 균열 이미지를 어디서 수집하고 어떻게 라벨링할지(공개 데이터셋 활용 여부, 직접 촬영 여부) 아직 안 정해짐.
 
 6. **배터리/비행시간 예산과 임무 계획**: 다리 규모 대비 한 번에 스캔 가능한 범위, 배터리 교체 주기, 비행 경로 플래닝(수동 조종 vs 사전 경로 자동 비행) 논의 필요. **제약사항 실측 확보(2026-07-13)**: 1번 항목 실측 결과 카메라-구조물 간 최소 80cm~1m 이상 거리를 유지해야 depth 측정이 정확함 — 비행 경로/접근 거리 플래닝 시 이 최소거리를 하한으로 반영해야 함.
 
-7. **전파 간섭**: ELRS(915MHz), WiFi(2.4/5GHz), VTX(5.8GHz)가 동시에 켜져 있을 때 근거리에서 서로 간섭 없는지 실측 필요 (특히 WiFi와 VTX 대역이 5GHz 근처로 겹칠 수 있음).
+7. **전파 간섭**: ELRS, WiFi, VTX가 동시에 켜져 있을 때 근거리에서 서로 간섭 없는지 실측 필요. **위험도 상향(2026-08-07)**: ELRS가 원래 계획이던 915MHz(WiFi/VTX와 대역 완전 분리)에서 **2.4GHz로 변경**되면서 `web_dashboard`가 쓰는 WiFi(2.4GHz)와 **같은 대역을 직접 공유**하게 됨 — 예전보다 훨씬 실측이 시급한 항목. VTX(4.9/5.8GHz)와는 여전히 분리돼 있어 우선순위는 낮음.
 
 8. **온보드 저장 용량**: 원본 영상+포인트클라우드를 비행 중 계속 저장한다면, 몇 분 비행에 몇 GB가 쌓이는지 계산해서 SD/SSD 용량이 충분한지 확인 필요.
+
+9. **프로펠러 체결 문제(2026-08-07 발견)**: 세트 스크류에 나사가 없어 스레드락(나사 고정제) 없이는 진동으로 풀릴 위험 — 현재 손으로 최대한 조인 임시 상태로 운용 중. 스레드락 구매/적용 전까지 매 비행 전 육안·촉각 점검 필수. 상세: `docs/hardware_final_spec.md` 3번.
+
+10. **Jetson BEC 전원 안정성 미검증**: MATEK BEC12S-PRO로 6S 배터리→12V 강압해 Jetson에 공급하는 구성인데, YOLO 추론처럼 GPU 부하가 튀는 상황에서 전압 강하(브라운아웃)가 나는지 아직 실측 안 됨. 필요시 BEC 출력단에 필터 커패시터 추가 고려.
 
 ---
 
@@ -125,5 +132,6 @@ bridge_drone_ws/
 
 - rosbridge vs 커스텀 WebSocket 중 선택
 - 커버리지 그리드 해상도 (몇 cm/m 단위로 나눌지)
-- 균열 크기 측정 알고리즘 설계 (8번 항목의 1)
-- 센서 fusion/캘리브레이션 담당자·일정
+- **`lidar_mapping`을 D455F 기반 Visual SLAM(RTAB-Map 등)으로 재구현** — LiDAR 제외 확정에 따른 최우선 재작업 (8번 항목 3)
+- 센서 fusion/캘리브레이션 담당자·일정 (D455F↔`base_link` extrinsic만 남음, 8번 항목 4)
+- ELRS 2.4GHz ↔ WiFi 2.4GHz 간섭 실측 일정 (8번 항목 7)
