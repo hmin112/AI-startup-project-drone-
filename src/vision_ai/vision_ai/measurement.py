@@ -1,19 +1,24 @@
 """Convert a pixel-space distance on the D455F depth image into a real-world
-millimeter distance, using the depth frame + camera intrinsics.
+millimeter distance, using a depth image + camera intrinsics.
 
 Ported from models/camera_calibration/pixel_to_mm.py (verified on-device:
 proper 3D deprojection vs. flat-plane approximation differed by 20% on an
-angled surface, and 60-70% across unrelated objects) with no logic changes.
+angled surface, and 60-70% across unrelated objects). The deprojection/
+distance math is unchanged from that validation — only the depth lookup
+source changed, from a live pyrealsense2 depth_frame to a raw depth image
+array + depth_scale, once vision_ai stopped opening the D455F directly and
+started subscribing to realsense2_camera's topics instead (D455F is now a
+single shared capture point, see vision_ai_node.py).
 """
 import pyrealsense2 as rs
 
 
-def measure_distance_mm(depth_frame, intrinsics, point_a, point_b):
+def measure_distance_mm(depth_image, depth_scale, intrinsics, point_a, point_b):
     ax, ay = point_a
     bx, by = point_b
 
-    depth_a = depth_frame.get_distance(ax, ay)
-    depth_b = depth_frame.get_distance(bx, by)
+    depth_a = float(depth_image[ay, ax]) * depth_scale
+    depth_b = float(depth_image[by, bx]) * depth_scale
 
     if depth_a == 0 or depth_b == 0:
         raise ValueError(
