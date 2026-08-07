@@ -48,6 +48,13 @@ def generate_launch_description():
             executable='vision_ai_node',
             name='vision_ai_node',
             output='screen',
+            # 2026-08-07 DeepCrack 파인튜닝 결과(mask mAP50 0.194->0.403,
+            # baseline 비교로 검증됨, docs/jetson_setup_log.md 참고). 워크스페이스
+            # 루트(~/bridge_drone_ws)에서 실행한다고 가정한 상대경로 — README의
+            # Run 안내와 동일한 전제.
+            parameters=[{
+                'model_path': 'models/crack_seg_v2_deepcrack_finetune.pt',
+            }],
         ),
         Node(
             package='lidar_mapping',
