@@ -1,11 +1,14 @@
-import os
-
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
-SLAM_PARAMS_FILE = os.path.join(
-    os.path.dirname(__file__), '..', 'config', 'mapper_params_online_async.yaml'
-)
+# rgbd_odometry/rtabmap가 구독하는 카메라 토픽 (단일 캡처 지점인
+# realsense2_camera_node가 발행, namespace='camera' name='camera'로
+# 기동하면 /camera/camera/... 로 중첩됨 — 4.58.2 기준 실측 확인).
+CAMERA_REMAPPINGS = [
+    ('rgb/image', '/camera/camera/color/image_raw'),
+    ('depth/image', '/camera/camera/aligned_depth_to_color/image_raw'),
+    ('rgb/camera_info', '/camera/camera/color/camera_info'),
+]
 
 
 def generate_launch_description():
@@ -58,27 +61,54 @@ def generate_launch_description():
             name='web_dashboard_node',
             output='screen',
         ),
-        # RPLIDAR A3의 드론 바디 기준 장착 위치. 실측 전까지의 대략값이며
-        # 실제 장착 후 캘리브레이션해서 갱신해야 한다 (D455F가 그랬듯
-        # 처음엔 공장/추정값으로 시작해도 무방).
+        # D455F의 드론 바디 기준 장착 위치. 실측 전까지의 대략값 —
+        # 예전 base_link->laser(RPLIDAR)와 같은 자리(2026-08-07 하드웨어
+        # 최종화로 LiDAR 제외, D455F가 그 역할까지 겸함).
+        # camera_link 밑으로는(camera_link->camera_color_optical_frame 등)
+        # realsense2_camera_node가 자체 발행하므로 base_link->camera_link만
+        # 있으면 TF 체인이 완성된다(실측 확인 완료).
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
-            name='base_to_laser_tf',
+            name='base_to_camera_tf',
             arguments=[
-                '--x', '0', '--y', '0', '--z', '0.1',
+                '--x', '0', '--y', '0', '--z', '0.05',
                 '--roll', '0', '--pitch', '0', '--yaw', '0',
-                '--frame-id', 'base_link', '--child-frame-id', 'laser',
+                '--frame-id', 'base_link', '--child-frame-id', 'camera_link',
             ],
         ),
-        # 라이다 스캔매칭 기반 SLAM. drone_core가 발행하는 odom->base_link
-        # 위에 map->odom 보정을 얹는 표준 nav2/slam_toolbox 구성 (GPS 없이도
-        # 동작 — 교량 하부 GPS 음영구역 대응).
+        # D455F 컬러+depth로 자체 Visual Odometry 계산, odom->base_link TF
+        # 발행 + /odom 토픽 publish. drone_core/MAVROS에 의존하지 않는
+        # 독립 오도메트리 소스로 설계함(Betaflight FC는 MAVROS와 정상
+        # 통신하지 않을 가능성이 높아서 — 별도 이슈, docs 8번 항목 3 참고).
         Node(
-            package='slam_toolbox',
-            executable='async_slam_toolbox_node',
-            name='slam_toolbox',
+            package='rtabmap_odom',
+            executable='rgbd_odometry',
+            name='rgbd_odometry',
             output='screen',
-            parameters=[SLAM_PARAMS_FILE],
+            parameters=[{
+                'frame_id': 'base_link',
+                'odom_frame_id': 'odom',
+                'publish_tf': True,
+                'approx_sync': True,
+            }],
+            remappings=CAMERA_REMAPPINGS,
+        ),
+        # 위 오도메트리 위에 루프클로징/맵빌딩을 얹어 map->odom 보정을
+        # 발행하는 RTAB-Map 본체 (RPLIDAR 기반 slam_toolbox 대체).
+        # '-d'는 기동 시마다 이전 세션 맵 DB를 지우고 새로 시작 — 지금은
+        # 개발/검증 단계라 켜둠, 나중에 맵을 세션 간 유지해야 하면 제거.
+        Node(
+            package='rtabmap_slam',
+            executable='rtabmap',
+            name='rtabmap',
+            output='screen',
+            parameters=[{
+                'frame_id': 'base_link',
+                'subscribe_depth': True,
+                'approx_sync': True,
+            }],
+            remappings=CAMERA_REMAPPINGS + [('odom', '/odom')],
+            arguments=['-d'],
         ),
     ])
