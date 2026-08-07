@@ -111,4 +111,14 @@ def generate_launch_description():
             remappings=CAMERA_REMAPPINGS + [('odom', '/odom')],
             arguments=['-d'],
         ),
+        # vision_ai의 2D 탐지(카메라 프레임 3D 위치 포함)를 위 TF 체인으로
+        # map 프레임까지 변환해서 /crack_fusion/tagged_detections로 재발행
+        # (2D→3D 크랙 태깅, docs 8번 항목 2). odom/map이 아직 없으면(카메라
+        # 정지 등으로 SLAM이 못 붙은 상태) 해당 탐지는 조용히 건너뜀.
+        Node(
+            package='lidar_mapping',
+            executable='crack_fusion_node',
+            name='crack_fusion_node',
+            output='screen',
+        ),
     ])

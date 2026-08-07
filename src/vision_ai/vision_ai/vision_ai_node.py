@@ -125,12 +125,21 @@ class VisionAiNode(Node):
         else:
             length_mm, width_mm = self._measure_from_bbox(depth_image, x1, y1, x2, y2)
 
+        # bbox 중심의 카메라 광학 프레임 3D 좌표(미터) — 2D→3D 맵 태깅용
+        # (crack_fusion_node.py가 이 값을 map 좌표로 변환). 크기(mm)와
+        # 별개로, "이 크랙이 어디 있는지" 위치 정보가 필요해서 추가.
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        center_camera_m = measurement.deproject_point_m(
+            depth_image, DEPTH_SCALE_M_PER_UNIT, self._intrinsics, (cx, cy)
+        )
+
         return {
             'class': class_names[int(box.cls[0])],
             'confidence': float(box.conf[0]),
             'bbox': [x1, y1, x2, y2],
             'length_mm': length_mm,
             'width_mm': width_mm,
+            'center_camera_m': list(center_camera_m) if center_camera_m is not None else None,
         }
 
     def _measure_from_mask(self, mask_xy, depth_image, width, height):

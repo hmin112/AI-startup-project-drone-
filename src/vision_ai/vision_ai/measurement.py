@@ -13,6 +13,21 @@ single shared capture point, see vision_ai_node.py).
 import pyrealsense2 as rs
 
 
+def deproject_point_m(depth_image, depth_scale, intrinsics, point):
+    """단일 픽셀을 카메라 광학 프레임 기준 3D 좌표(미터)로 역투영.
+
+    2D 탐지를 3D 지도에 태깅하려면(크랙 태깅/퓨전, crack_fusion_node.py
+    참고) 크기(mm)뿐 아니라 위치 자체도 필요해서 분리한 헬퍼 — 아래
+    measure_distance_mm()과 같은 rs2_deproject_pixel_to_point 호출을
+    재사용한다.
+    """
+    x, y = point
+    depth = float(depth_image[y, x]) * depth_scale
+    if depth == 0:
+        return None
+    return rs.rs2_deproject_pixel_to_point(intrinsics, [x, y], depth)
+
+
 def measure_distance_mm(depth_image, depth_scale, intrinsics, point_a, point_b):
     ax, ay = point_a
     bx, by = point_b

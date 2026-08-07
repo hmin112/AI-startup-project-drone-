@@ -252,6 +252,19 @@ RPLIDAR A3/TFmini/GPS 모듈 완전 제외, ELRS 915MHz→2.4GHz 변경, Jetson 
 
 전부 GitHub에 커밋/푸시 완료(단계별로 4개 커밋으로 분리).
 
+## 2026-08-07 세션 (계속) — 2D→3D 크랙 태깅/퓨전 노드 구현
+
+목표: `docs/bridge_drone_project_summary.md` 8번 항목 2(2D 탐지를 3D 지도 좌표로 정합) 구현. 하드웨어 없이 원격으로 진행 가능한 작업이라 이번 세션에 이어서 착수.
+
+- `vision_ai/measurement.py`에 `deproject_point_m(depth_image, depth_scale, intrinsics, point)` 헬퍼 추가 — 기존 `measure_distance_mm()`과 같은 `rs2_deproject_pixel_to_point` 호출 재사용, 단일 픽셀을 카메라 광학 프레임 3D 좌표(m)로 변환. depth 무효(0)면 `None`.
+- `vision_ai_node.py`의 `_describe_detection()`에 bbox 중심의 3D 위치(`center_camera_m`)를 계산해 탐지 JSON에 추가 — 기존 `length_mm`/`width_mm`(크기)와 별개로 "위치" 정보가 필요했음.
+- `src/lidar_mapping/lidar_mapping/crack_fusion_node.py` 신규: `/vision_ai/detections` 구독, tf2(`camera_color_optical_frame → map`)로 각 탐지의 `center_camera_m`을 `map` 좌표로 변환해 `map_position_m`을 덧붙여 `/crack_fusion/tagged_detections`로 재발행. TF 체인이 없으면(SLAM 미기동 등) 해당 탐지만 조용히 스킵 — 크래시 없음. `/vision_ai/detections`엔 타임스탬프가 없어서 "최신 사용 가능한" TF를 씀(정밀도보다 단순함 우선, 코드 주석에 한계 명시).
+- `lidar_mapping` 패키지에 새 노드 등록(`setup.py` entry_points), 의존성 추가(`geometry_msgs`, `tf2_ros`, `tf2_geometry_msgs` — 전부 이미 젯슨에 설치돼 있어서 추가 apt 불필요).
+- **검증**: (1) 합성 핀홀 케이스로 `deproject_point_m()` 수학 검증(중심 픽셀→[0,0,1.0]m 등, 예상값과 일치). (2) 젯슨에서 `crack_fusion_node`를 실제로 띄워서 TF가 전혀 없을 때 크래시 없이 조용히 스킵하는 것 확인. (3) **map→odom→base_link→camera_link(z=0.05)→camera_color_optical_frame 합성 TF 체인**(전부 항등변환 + z오프셋 하나)을 4개의 `static_transform_publisher`로 구성해서 실제로 띄우고, 합성 탐지(`center_camera_m: [0.1, 0.2, 1.5]`)를 퍼블리시 → `map_position_m: [0.1, 0.2, 1.55]` 수신, 기대값과 정확히 일치 확인. `ros2 topic echo`의 기본 `--truncate-length`(128자)에 걸려 출력이 잘려서 처음엔 결과를 오독할 뻔함 — 긴 JSON 문자열 토픽 확인할 땐 `--truncate-length` 크게 줄 것(팁으로 기록).
+- **미검증**: 실제 SLAM(rgbd_odometry+rtabmap)이 붙은 라이브 환경에서의 동작 — 카메라 정지 상태라 `map`/`odom` 프레임 자체가 안 생겨서 이번 세션엔 못함. 위 "카메라를 실제로 움직이며 RTAB-Map 라이브 검증" 항목에 종속.
+
+전부 GitHub에 커밋/푸시 완료.
+
 ## 다음에 이어서 할 것
 
 - [x] ~~Jetson 응답 없음 문제 해결~~ — 전원 재인가로 복구, watchdog으로 재발 방지
@@ -262,7 +275,8 @@ RPLIDAR A3/TFmini/GPS 모듈 완전 제외, ELRS 915MHz→2.4GHz 변경, Jetson 
 - [x] ~~`web_dashboard` 스켈레톤 만들기~~ — 완료 (탐지 테이블 + 카메라 스트리밍 + 드론 상태 배지)
 - [x] ~~하드웨어 최종화 (RPLIDAR/TFmini/GPS 제외, ELRS 2.4GHz, BEC 추가)~~ — 2026-08-07 확정, 문서 반영 완료
 - [x] ~~`lidar_mapping`을 D455F 기반 Visual SLAM(RTAB-Map)으로 재구현~~ — 2026-08-07 완료, 구조적 검증까지 끝남
-- [ ] **카메라를 실제로 움직이며 RTAB-Map 라이브 검증 (최우선, 다음 하드웨어 세션)** — TF 갱신/루프클로저/드리프트, 위 "한계" 참고
+- [x] ~~2D→3D 크랙 태깅/퓨전 로직 구현~~ — 2026-08-07 완료, 합성 TF 체인으로 수학 검증까지 끝남
+- [ ] **카메라를 실제로 움직이며 RTAB-Map 라이브 검증 (최우선, 다음 하드웨어 세션)** — TF 갱신/루프클로저/드리프트, 위 "한계" 참고. `crack_fusion_node`의 라이브(합성 아닌 실제 SLAM) 검증도 여기 종속
 - [ ] **vision_ai mm 측정 정확도 재검증(우드락 재실험 등)** — 카메라 캡처 리팩터링(단일화) 이후 아직 실물로 확인 못함
 - [ ] 실제 균열 있는 현장에서 재검증 — 우드락 실험은 인공 흠집이라 참고용. 최소 80cm~1m 거리 유지 필수
 - [ ] 학습된 균열 모델로 BCD/UAV-pdd2023(드론 앵글) 파인튜닝 확장 여부 결정
