@@ -265,6 +265,37 @@ RPLIDAR A3/TFmini/GPS 모듈 완전 제외, ELRS 915MHz→2.4GHz 변경, Jetson 
 
 전부 GitHub에 커밋/푸시 완료.
 
+## 2026-08-07 세션 (계속) — DeepCrack 파인튜닝 (원격, 하드웨어 불필요)
+
+목표: `docs/bridge_drone_project_summary.md` 5번 항목(드론 앵글 데이터셋 확장) 진행. 원래 후보였던 BCD/UAV-PDD2023을 실측했으나 둘 다 세그멘테이션 학습엔 못 쓴다고 확인:
+
+- **BCD**: Google Drive에서 `gdown --folder`로 실제 다운로드해서 확인 — `train.txt`/`val.txt`가 `파일명\t0또는1` 형식, 이미지도 224×224 패치(`picture1~3.zip`). **SDNET2018과 완전히 동일한 함정**(분류 전용, bbox/마스크 없음). 라벨 분포 확인: 0(no-crack) 3898개, 1(crack) 958개.
+- **UAV-PDD2023**: Zenodo(https://zenodo.org/records/8429208, CC BY 4.0)에서 확인 — 2,440장/11,158 인스턴스, **PASCAL VOC bbox 포맷**(세그멘테이션 마스크 없음), 도로 포장 결함(균열/패칭/포트홀) 6종, 드론 30m 고도 촬영. 마스크가 없어서 crack-seg와 바로 합칠 수 없음.
+- 대신 이미 알고 있던 **DeepCrack**(`github.com/yhlleo/DeepCrack`, 저장소 자체에 `dataset/DeepCrack.zip` 포함)을 사용. `git clone --depth 1` → 압축 해제 → `train_img`/`train_lab`(300장) + `test_img`/`test_lab`(237장), 마스크는 0/255 단일채널 PNG(파일명은 이미지와 동일, 확장자만 다름). **라이선스 주의: 비상업적 연구/교육 목적으로만 사용 제한** — 나중에 상용화 단계에선 재확인 필요.
+
+**마스크 → YOLO-seg 폴리곤 변환**: `scripts/convert_deepcrack_to_yolo_seg.py` 작성 — `cv2.findContours`로 마스크의 연결된 균열 영역마다 하나의 폴리곤 인스턴스(class 0) 생성, `images/{train,val}`+`labels/{train,val}` 구조로 배치, `data.yaml` 자동 생성. 537장 전부 유효 라벨 생성(빈 라벨 0개), 총 1,743개 인스턴스, 좌표 정규화 범위 확인(0.0~0.998, 정상).
+
+**파인튜닝 (안전 학습 프로토콜 그대로 재사용)**:
+- 기존 `runs/segment/crack_seg_v1/weights/best.pt`에서 이어서 학습(주의: 이 체크포인트는 `models/`에 커밋은 됐지만 젯슨엔 원래부터 `runs/segment/crack_seg_v1/weights/`에 남아있던 원본이 있었음 — git으로 젯슨에 내려받은 게 아님, 로컬 파일 그대로 사용)
+- `yolo segment train model=runs/segment/crack_seg_v1/weights/best.pt data=datasets/deepcrack_yolo/data.yaml epochs=50 workers=2 batch=8 patience=15 lr0=0.001 name=deepcrack_finetune_v1`
+- `optimizer=auto`가 기본이라 지정한 `lr0=0.001`이 무시되고 AdamW lr=0.002로 자동 결정됨(치명적이진 않음, 다음에 명시적으로 고정하려면 `optimizer=AdamW`도 같이 지정할 것)
+- `watchdog.sh` 동시 가동, 초반 swap이 0%→28%까지 빠르게 올랐다가(에포크 1~8) **안정적으로 plateau** — 이전 OOM 인시던트만큼 위험하진 않았지만 300장짜리 작은 데이터셋치고는 예상보다 메모리를 씀(`workers=2` 지정했는데 실제로 학습 프로세스 외 자식 프로세스가 6개 떠서 관찰됨 — 검증용 dataloader가 별도로 더 뜨는 것으로 추정, 정확한 원인 미확인). watchdog 발동 없이 자연 종료.
+- **결과**: 15에포크에서 최고 성능 도달 후 개선 없어서 30에포크에 EarlyStopping(patience=15) 발동, 총 0.213시간(약 13분) 소요.
+
+**효과 검증 (같은 DeepCrack val 237장 기준 전/후 비교, 다른 테스트셋과 섞지 않고 공정 비교)**:
+| | 원본(crack_seg_v1) | 파인튜닝 후(v2) |
+|---|---|---|
+| Box mAP50 | 0.267 | 0.428 |
+| Mask mAP50 | 0.194 | 0.403 |
+| Mask recall | 0.223 | 0.411 |
+| Mask precision | 0.410 | 0.515 |
+
+전부 뚜렷하게 개선됨 — 파인튜닝이 실제로 효과 있었다는 것을 baseline 비교로 직접 확인. `models/crack_seg_v2_deepcrack_finetune.pt`로 커밋 (Git LFS), 학습 기록(`results.csv`/`args.yaml`)은 `models/training_records/deepcrack_finetune_v1/`에 같이 커밋.
+
+**남은 한계**: DeepCrack이 실제 드론 촬영인지 미확인(문헌상 지상/근접 촬영일 가능성) — 이번 파인튜닝은 "세그멘테이션 성능 자체"는 개선했지만 "드론 각도 일반화"까지 검증된 건 아님. 진짜 드론 앵글 데이터로의 확장은 여전히 열린 과제(UAV-PDD2023을 bbox→대략 마스크로 변환해서 보조로 쓰는 방법 등 다음에 고려 가능).
+
+전부 GitHub에 커밋/푸시 완료.
+
 ## 다음에 이어서 할 것
 
 - [x] ~~Jetson 응답 없음 문제 해결~~ — 전원 재인가로 복구, watchdog으로 재발 방지
@@ -276,6 +307,8 @@ RPLIDAR A3/TFmini/GPS 모듈 완전 제외, ELRS 915MHz→2.4GHz 변경, Jetson 
 - [x] ~~하드웨어 최종화 (RPLIDAR/TFmini/GPS 제외, ELRS 2.4GHz, BEC 추가)~~ — 2026-08-07 확정, 문서 반영 완료
 - [x] ~~`lidar_mapping`을 D455F 기반 Visual SLAM(RTAB-Map)으로 재구현~~ — 2026-08-07 완료, 구조적 검증까지 끝남
 - [x] ~~2D→3D 크랙 태깅/퓨전 로직 구현~~ — 2026-08-07 완료, 합성 TF 체인으로 수학 검증까지 끝남
+- [x] ~~드론 앵글 데이터셋 파인튜닝~~ — BCD/UAV-PDD2023 둘 다 세그멘테이션 부적합 확인, DeepCrack으로 대체 파인튜닝 완료(mask mAP50 0.194→0.403, baseline 비교로 효과 검증). 단, DeepCrack이 진짜 드론 앵글인지는 미확인 — 아래 항목 참고
+- [ ] 진짜 드론 앵글 세그멘테이션 데이터 확보 — UAV-PDD2023(bbox만 있음)을 대략 마스크로 변환해서 보조 데이터로 쓰는 방법 등 검토 필요
 - [ ] **카메라를 실제로 움직이며 RTAB-Map 라이브 검증 (최우선, 다음 하드웨어 세션)** — TF 갱신/루프클로저/드리프트, 위 "한계" 참고. `crack_fusion_node`의 라이브(합성 아닌 실제 SLAM) 검증도 여기 종속
 - [ ] **vision_ai mm 측정 정확도 재검증(우드락 재실험 등)** — 카메라 캡처 리팩터링(단일화) 이후 아직 실물로 확인 못함
 - [ ] 실제 균열 있는 현장에서 재검증 — 우드락 실험은 인공 흠집이라 참고용. 최소 80cm~1m 거리 유지 필수

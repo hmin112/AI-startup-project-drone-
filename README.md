@@ -13,7 +13,8 @@ bridge_drone_ws/
 │   └── web_dashboard/    # 분석 결과 및 3D 디지털 트윈 실시간 웹 시각화
 ├── launch/
 │   └── bridge_drone.launch.py  # D455F 캡처(realsense2_camera) + drone_core/vision_ai/lidar_mapping/web_dashboard + RTAB-Map(rgbd_odometry, rtabmap) 전체 기동
-├── models/                # 학습된 모델 가중치 (Git LFS 관리 예정)
+├── models/                # 학습된 모델 가중치(Git LFS) + training_records/(에포크별 학습 기록)
+├── scripts/               # 데이터셋 변환 등 1회성 도구 스크립트
 └── docs/                  # 문서
 ```
 
