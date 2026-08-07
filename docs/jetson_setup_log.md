@@ -296,6 +296,20 @@ RPLIDAR A3/TFmini/GPS 모듈 완전 제외, ELRS 915MHz→2.4GHz 변경, Jetson 
 
 전부 GitHub에 커밋/푸시 완료.
 
+## 2026-08-07 세션 (계속) — web_dashboard에 3D 태깅 결과 연동 + 잠재 버그 발견/수정
+
+목표: `crack_fusion_node`의 `/crack_fusion/tagged_detections`를 대시보드에서 보이게 연결(파이프라인 완성). `web_dashboard_node`에 구독 추가, `index.html`에 새 테이블(class/confidence/length/width/map x,y,z) 추가 — `map_position_m` 필드 유무로 기존 `/vision_ai/detections`(같은 JSON 배열 형태)와 구분.
+
+**빌드 후 젯슨에서 라이브로 검증하다가 이번 변경과 무관한 기존 버그를 발견함**: `web_dashboard_node`가 웹소켓 연결 집합을 `self._clients`란 이름으로 저장하는데, 이게 `rclpy.node.Node`가 내부적으로 쓰는 `_clients`(ROS2 서비스 클라이언트 목록) 속성과 이름이 겹침. `Node.__init__()` 이후에 `self._clients = set()`로 덮어써서, rclpy 실행기가 나중에 자기 내부 클라이언트 목록인 줄 알고 순회하다가 `AttributeError: 'ServerConnection' object has no attribute 'handle'`로 크래시(노드가 기동 직후 죽음). 2026-07-13 세션엔 왜 안 걸렸는지는 불명(그때는 브라우저로 짧게 확인만 하고 끝났을 가능성) — 이번처럼 실제로 몇 분 이상 떠 있게 두고 rclpy executor가 특정 콜백 사이클을 도는 상황에서 터지는 것으로 추정.
+
+**수정**: `self._clients` → `self._ws_clients`로 전부 리네임(충돌 회피), 코드에 왜 `_clients`란 이름을 쓰면 안 되는지 주석으로 명시(재발 방지).
+
+**검증**: 디버그 print를 임시로 넣어서 (1) 클라이언트 연결이 핸들러에 정상 도달하는지, (2) 브로드캐스트가 실제로 클라이언트 수만큼 순회하는지 직접 확인. 이후 파이썬 `websockets` 클라이언트로 3가지 메시지 타입(`/crack_fusion/tagged_detections`, `/vision_ai/detections`, `/drone_core/status`)을 순서대로 발행해서 전부 정확히 수신되는 것 확인 — 웹소켓 브로드캐스트 경로 자체는 정상. **주의**: 첫 시도에서 원격 SSH 명령 사이의 왕복 지연 때문에 테스트 클라이언트의 타임아웃이 발행 전에 만료되는 것을 실제 버그로 착각할 뻔함 — 원격 라이브 테스트에서 클라이언트 타임아웃은 SSH round-trip 여유를 넉넉히 잡을 것(교훈으로 기록).
+
+브라우저 프론트엔드 자체(`index.html`의 `renderTagged()` 렌더링)는 메시지 포맷/전달까지만 확인했고 실제 브라우저 렌더링은 원격이라 육안 확인 못함 — 다음 하드웨어 세션에서 확인.
+
+전부 GitHub에 커밋/푸시 완료.
+
 ## 다음에 이어서 할 것
 
 - [x] ~~Jetson 응답 없음 문제 해결~~ — 전원 재인가로 복구, watchdog으로 재발 방지
@@ -309,6 +323,7 @@ RPLIDAR A3/TFmini/GPS 모듈 완전 제외, ELRS 915MHz→2.4GHz 변경, Jetson 
 - [x] ~~2D→3D 크랙 태깅/퓨전 로직 구현~~ — 2026-08-07 완료, 합성 TF 체인으로 수학 검증까지 끝남
 - [x] ~~드론 앵글 데이터셋 파인튜닝~~ — BCD/UAV-PDD2023 둘 다 세그멘테이션 부적합 확인, DeepCrack으로 대체 파인튜닝 완료(mask mAP50 0.194→0.403, baseline 비교로 효과 검증). 단, DeepCrack이 진짜 드론 앵글인지는 미확인 — 아래 항목 참고
 - [ ] 진짜 드론 앵글 세그멘테이션 데이터 확보 — UAV-PDD2023(bbox만 있음)을 대략 마스크로 변환해서 보조 데이터로 쓰는 방법 등 검토 필요
+- [x] ~~web_dashboard에 3D 태깅 결과 연동~~ — 완료, 겸사겸사 기존 `self._clients` 네이밍 충돌 버그(크래시)도 발견/수정. 브라우저 실제 렌더링 육안 확인은 다음 하드웨어 세션에
 - [ ] **카메라를 실제로 움직이며 RTAB-Map 라이브 검증 (최우선, 다음 하드웨어 세션)** — TF 갱신/루프클로저/드리프트, 위 "한계" 참고. `crack_fusion_node`의 라이브(합성 아닌 실제 SLAM) 검증도 여기 종속
 - [ ] **vision_ai mm 측정 정확도 재검증(우드락 재실험 등)** — 카메라 캡처 리팩터링(단일화) 이후 아직 실물로 확인 못함
 - [ ] 실제 균열 있는 현장에서 재검증 — 우드락 실험은 인공 흠집이라 참고용. 최소 80cm~1m 거리 유지 필수

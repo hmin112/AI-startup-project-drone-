@@ -52,10 +52,21 @@
   </table>
   <div id="empty">아직 수신된 탐지 결과가 없습니다.</div>
 
+  <h2>3D 태깅된 크랙 (지도 좌표)</h2>
+  <table>
+    <thead>
+      <tr><th>class</th><th>confidence</th><th>length (mm)</th><th>width (mm)</th><th>map x (m)</th><th>map y (m)</th><th>map z (m)</th></tr>
+    </thead>
+    <tbody id="tagged-rows"></tbody>
+  </table>
+  <div id="tagged-empty">아직 3D 태깅된 크랙이 없습니다 (SLAM이 아직 맵을 못 잡았을 수 있음).</div>
+
 <script>
   const statusEl = document.getElementById('status');
   const rowsEl = document.getElementById('rows');
   const emptyEl = document.getElementById('empty');
+  const taggedRowsEl = document.getElementById('tagged-rows');
+  const taggedEmptyEl = document.getElementById('tagged-empty');
   const cameraEl = document.getElementById('camera');
   const cameraEmptyEl = document.getElementById('camera-empty');
   const droneConnectedEl = document.getElementById('drone-connected');
@@ -91,7 +102,14 @@
         return;
       }
       if (Array.isArray(parsed)) {
-        render(parsed);
+        // /vision_ai/detections와 /crack_fusion/tagged_detections 둘 다
+        // JSON 배열이라, map_position_m 필드 유무로 구분한다(퓨전 노드는
+        // map 좌표 변환에 성공한 탐지만 내보내므로 있으면 항상 채워져 있음).
+        if (parsed.length && parsed[0].map_position_m) {
+          renderTagged(parsed);
+        } else {
+          render(parsed);
+        }
       } else {
         renderDroneStatus(parsed);
       }
@@ -137,6 +155,26 @@
         <td>${(d.bbox || []).join(', ')}</td>
       `;
       rowsEl.appendChild(tr);
+    }
+  }
+
+  function renderTagged(detections) {
+    taggedRowsEl.innerHTML = '';
+    taggedEmptyEl.style.display = detections.length ? 'none' : 'block';
+    for (const d of detections) {
+      const fmt = (v) => (v === null || v === undefined) ? '-' : (typeof v === 'number' ? v.toFixed(1) : v);
+      const [mx, my, mz] = d.map_position_m || [null, null, null];
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${fmt(d.class)}</td>
+        <td>${fmt(d.confidence)}</td>
+        <td>${fmt(d.length_mm)}</td>
+        <td>${fmt(d.width_mm)}</td>
+        <td>${fmt(mx)}</td>
+        <td>${fmt(my)}</td>
+        <td>${fmt(mz)}</td>
+      `;
+      taggedRowsEl.appendChild(tr);
     }
   }
 

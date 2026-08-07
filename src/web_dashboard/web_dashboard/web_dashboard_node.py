@@ -25,7 +25,12 @@ class WebDashboardNode(Node):
         self.declare_parameter('http_port', 8080)
         self.declare_parameter('ws_port', 8765)
 
-        self._clients = set()
+        # rclpy.node.Node가 내부적으로 self._clients(서비스 클라이언트 목록)를
+        # 쓰기 때문에 같은 이름을 쓰면 실행기가 웹소켓 연결을 자기 내부
+        # 클라이언트로 착각해서 크래시한다(실측 확인, AttributeError:
+        # 'ServerConnection' object has no attribute 'handle') — 절대
+        # self._clients로 되돌리지 말 것.
+        self._ws_clients = set()
         self._loop = None
         self._loop_ready = threading.Event()
         self._bridge = CvBridge()
@@ -41,6 +46,9 @@ class WebDashboardNode(Node):
             Image, '/vision_ai/annotated', self._on_annotated, qos_profile_sensor_data
         )
         self.create_subscription(String, '/drone_core/status', self._on_drone_status, 10)
+        self.create_subscription(
+            String, '/crack_fusion/tagged_detections', self._on_tagged_detections, 10
+        )
 
         http_port = self.get_parameter('http_port').value
         ws_port = self.get_parameter('ws_port').value
@@ -52,12 +60,12 @@ class WebDashboardNode(Node):
         ws_port = self.get_parameter('ws_port').value
 
         async def handler(websocket):
-            self._clients.add(websocket)
+            self._ws_clients.add(websocket)
             try:
                 async for _ in websocket:
                     pass  # 브라우저 -> 서버 메시지는 아직 사용하지 않음
             finally:
-                self._clients.discard(websocket)
+                self._ws_clients.discard(websocket)
 
         async def serve():
             async with websockets.serve(handler, '0.0.0.0', ws_port):
@@ -75,17 +83,22 @@ class WebDashboardNode(Node):
         return server
 
     def _on_detections(self, msg):
-        if not self._clients or self._loop is None:
+        if not self._ws_clients or self._loop is None:
             return
         asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)
 
     def _on_drone_status(self, msg):
-        if not self._clients or self._loop is None:
+        if not self._ws_clients or self._loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)
+
+    def _on_tagged_detections(self, msg):
+        if not self._ws_clients or self._loop is None:
             return
         asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)
 
     def _on_annotated(self, msg):
-        if not self._clients or self._loop is None:
+        if not self._ws_clients or self._loop is None:
             return
         frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
@@ -95,12 +108,12 @@ class WebDashboardNode(Node):
 
     async def _broadcast(self, payload):
         dead = set()
-        for client in list(self._clients):
+        for client in list(self._ws_clients):
             try:
                 await client.send(payload)
             except websockets.ConnectionClosed:
                 dead.add(client)
-        self._clients -= dead
+        self._ws_clients -= dead
 
     def destroy_node(self):
         self._http_server.shutdown()
