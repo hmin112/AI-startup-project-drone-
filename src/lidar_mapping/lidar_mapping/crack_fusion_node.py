@@ -4,6 +4,7 @@ import rclpy
 import tf2_geometry_msgs  # noqa: F401 (registers PointStamped conversion for tf2_ros.Buffer.transform)
 from geometry_msgs.msg import PointStamped
 from rclpy.duration import Duration
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 from std_msgs.msg import String
@@ -31,6 +32,13 @@ class CrackFusionNode(Node):
     속도 대비 탐지 주기(~10Hz)가 충분히 빠르다고 가정한 근사 — 요구
     정밀도가 높아지면 vision_ai가 탐지 JSON에 타임스탬프를 싣도록
     바꾸고 여기서도 정확히 그 시점의 TF를 조회하도록 개선 필요.
+
+    **실행기 주의**: `_to_map_frame()`이 `buffer.transform(..., timeout=...)`
+    으로 최대 0.2초 블로킹 대기하는데, 이 노드가 싱글스레드 executor로
+    돌면 그 대기 중엔 TF 리스너 자신의 구독 콜백도 같은 스레드를 못 얻어서
+    못 돈다 — 즉 기다리는 동안 정작 기다리는 TF 메시지가 절대 도착 못
+    하는 자기 자신을 막는 구조가 됨(실측 확인). `main()`에서 반드시
+    `MultiThreadedExecutor`로 spin해야 이 대기가 의미 있게 동작한다.
     """
 
     SOURCE_FRAME = 'camera_color_optical_frame'
@@ -90,8 +98,13 @@ class CrackFusionNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = CrackFusionNode()
+    # 싱글스레드 executor면 TF 대기(_to_map_frame)가 그 TF를 배달할
+    # 리스너 콜백과 스레드를 다퉈서 절대 성공 못 함 — 클래스 docstring
+    # 참고. 반드시 멀티스레드로 돌려야 한다.
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

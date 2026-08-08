@@ -20,6 +20,9 @@ SPLITS = [("train", "train"), ("test", "val")]  # DeepCrack split -> YOLO split 
 
 def mask_to_yolo_lines(mask_path, img_width, img_height):
     mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        print(f"WARNING: could not read mask {mask_path}, skipping")
+        return []
     _, binary = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -54,6 +57,9 @@ def main():
             mask_path = os.path.join(lab_src_dir, f"{stem}.png")
 
             img = cv2.imread(img_path)
+            if img is None:
+                print(f"WARNING: could not read image {img_path}, skipping")
+                continue
             height, width = img.shape[:2]
 
             lines = mask_to_yolo_lines(mask_path, width, height)

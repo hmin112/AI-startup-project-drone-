@@ -41,13 +41,18 @@ class WebDashboardNode(Node):
 
         self._http_server = self._start_http_server()
 
-        self.create_subscription(String, '/vision_ai/detections', self._on_detections, 10)
+        # 그대로 텍스트만 중계하는 토픽들 — 전부 같은 "클라이언트 있으면
+        # msg.data를 방송" 패턴이라 하나의 콜백을 재사용(토픽 늘어날 때마다
+        # 거의 동일한 메서드를 복붙하는 걸 방지).
+        for topic in (
+            '/vision_ai/detections',
+            '/drone_core/status',
+            '/crack_fusion/tagged_detections',
+            '/coverage_grid/status',
+        ):
+            self.create_subscription(String, topic, self._relay_text, 10)
         self.create_subscription(
             Image, '/vision_ai/annotated', self._on_annotated, qos_profile_sensor_data
-        )
-        self.create_subscription(String, '/drone_core/status', self._on_drone_status, 10)
-        self.create_subscription(
-            String, '/crack_fusion/tagged_detections', self._on_tagged_detections, 10
         )
 
         http_port = self.get_parameter('http_port').value
@@ -82,17 +87,7 @@ class WebDashboardNode(Node):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
 
-    def _on_detections(self, msg):
-        if not self._ws_clients or self._loop is None:
-            return
-        asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)
-
-    def _on_drone_status(self, msg):
-        if not self._ws_clients or self._loop is None:
-            return
-        asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)
-
-    def _on_tagged_detections(self, msg):
+    def _relay_text(self, msg):
         if not self._ws_clients or self._loop is None:
             return
         asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)

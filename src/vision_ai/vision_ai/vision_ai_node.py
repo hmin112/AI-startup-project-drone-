@@ -15,9 +15,10 @@ from ultralytics import YOLO
 
 from vision_ai import measurement
 
-# D455F: 1 raw depth unit = 1mm (depth_scale_m_per_unit in
-# models/camera_calibration/d455f_intrinsics_1280x720.json).
-DEPTH_SCALE_M_PER_UNIT = 0.001
+# 첫 N개 동기화 프레임은 버림 — realsense2_camera_node가 막 기동했을 때
+# 자동노출/화이트밸런스가 아직 수렴 중일 수 있어서, 예전 pyrealsense2
+# 직접 캡처 시절의 CAPTURE_WARMUP_FRAMES(30)과 같은 목적으로 유지.
+WARMUP_FRAME_COUNT = 30
 
 
 class VisionAiNode(Node):
@@ -34,6 +35,11 @@ class VisionAiNode(Node):
 
         self.declare_parameter('model_path', 'yolov8n.pt')
         self.declare_parameter('publish_rate_hz', 10.0)
+        # D455F 표준값은 1 raw depth unit = 1mm (모델별로 다를 수 있어서
+        # 하드코딩 대신 파라미터로 뺌 — models/camera_calibration/
+        # d455f_intrinsics_1280x720.json의 depth_scale_m_per_unit과 동일).
+        self.declare_parameter('depth_scale_m_per_unit', 0.001)
+        self._depth_scale_m_per_unit = self.get_parameter('depth_scale_m_per_unit').value
 
         model_path = self.get_parameter('model_path').value
         self._model = YOLO(model_path)
@@ -44,6 +50,17 @@ class VisionAiNode(Node):
         self._latest_detections = []
         self._latest_annotated = None
         self._intrinsics = None
+
+        # 최신 동기화 프레임 쌍을 추론 스레드에 넘기기 위한 슬롯 — YOLO
+        # 추론은 무거워서(수십~100ms+) ROS2 executor 콜백 안에서 동기
+        # 실행하면 executor 전체가 블록됨(timer/다른 구독 콜백도 못 돔).
+        # 캡처(구독 콜백)와 추론(백그라운드 스레드)을 분리해서 예전
+        # pyrealsense2 직접 캡처 시절의 "executor never blocks" 설계를
+        # 그대로 유지.
+        self._pending_frames = None
+        self._frame_ready = threading.Event()
+        self._stop_event = threading.Event()
+        self._frames_received = 0
 
         self._detections_pub = self.create_publisher(String, '/vision_ai/detections', 10)
         self._annotated_pub = self.create_publisher(
@@ -72,6 +89,9 @@ class VisionAiNode(Node):
         self._sync = ApproximateTimeSynchronizer([color_sub, depth_sub], queue_size=10, slop=0.05)
         self._sync.registerCallback(self._on_frames)
 
+        self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self._inference_thread.start()
+
         publish_rate_hz = self.get_parameter('publish_rate_hz').value
         self.create_timer(1.0 / publish_rate_hz, self._publish_latest)
 
@@ -95,25 +115,48 @@ class VisionAiNode(Node):
         self.get_logger().info('camera intrinsics received')
 
     def _on_frames(self, color_msg, depth_msg):
+        # 가벼운 디코딩만 구독 콜백에서 처리(cv_bridge 변환은 GPU 추론에
+        # 비하면 무시할 만함) — 무거운 YOLO 추론은 별도 스레드로 넘긴다.
         if self._intrinsics is None:
+            return
+
+        self._frames_received += 1
+        if self._frames_received <= WARMUP_FRAME_COUNT:
             return
 
         color_image = self._bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
         depth_image = self._bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
-        height, width = color_image.shape[:2]
-
-        results = self._model(color_image, device=0, verbose=False)
-        result = results[0]
-        masks_xy = result.masks.xy if result.masks is not None else [None] * len(result.boxes)
-        detections = [
-            self._describe_detection(box, mask_xy, self._model.names, depth_image, width, height)
-            for box, mask_xy in zip(result.boxes, masks_xy)
-        ]
-        annotated = result.plot()
 
         with self._lock:
-            self._latest_detections = detections
-            self._latest_annotated = annotated
+            self._pending_frames = (color_image, depth_image)
+        self._frame_ready.set()
+
+    def _inference_loop(self):
+        while not self._stop_event.is_set():
+            if not self._frame_ready.wait(timeout=1.0):
+                continue
+            self._frame_ready.clear()
+
+            with self._lock:
+                frames = self._pending_frames
+                self._pending_frames = None
+            if frames is None:
+                continue
+            color_image, depth_image = frames
+            height, width = color_image.shape[:2]
+
+            results = self._model(color_image, device=0, verbose=False)
+            result = results[0]
+            masks_xy = result.masks.xy if result.masks is not None else [None] * len(result.boxes)
+            detections = [
+                self._describe_detection(box, mask_xy, self._model.names, depth_image, width, height)
+                for box, mask_xy in zip(result.boxes, masks_xy)
+            ]
+            annotated = result.plot()
+
+            with self._lock:
+                self._latest_detections = detections
+                self._latest_annotated = annotated
 
     def _describe_detection(self, box, mask_xy, class_names, depth_image, width, height):
         x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
@@ -130,7 +173,7 @@ class VisionAiNode(Node):
         # 별개로, "이 크랙이 어디 있는지" 위치 정보가 필요해서 추가.
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         center_camera_m = measurement.deproject_point_m(
-            depth_image, DEPTH_SCALE_M_PER_UNIT, self._intrinsics, (cx, cy)
+            depth_image, self._depth_scale_m_per_unit, self._intrinsics, (cx, cy)
         )
 
         return {
@@ -173,7 +216,7 @@ class VisionAiNode(Node):
     def _safe_measure(self, depth_image, point_a, point_b):
         try:
             return measurement.measure_distance_mm(
-                depth_image, DEPTH_SCALE_M_PER_UNIT, self._intrinsics, point_a, point_b
+                depth_image, self._depth_scale_m_per_unit, self._intrinsics, point_a, point_b
             )
         except ValueError:
             return None
@@ -188,6 +231,12 @@ class VisionAiNode(Node):
 
         self._detections_pub.publish(String(data=json.dumps(detections)))
         self._annotated_pub.publish(self._bridge.cv2_to_imgmsg(annotated, encoding='bgr8'))
+
+    def destroy_node(self):
+        self._stop_event.set()
+        self._frame_ready.set()  # 대기 중이면 깨워서 루프가 stop_event를 보게 함
+        self._inference_thread.join(timeout=5.0)
+        super().destroy_node()
 
 
 def main(args=None):
