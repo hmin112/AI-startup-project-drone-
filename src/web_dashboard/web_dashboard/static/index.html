@@ -25,6 +25,8 @@
   #drone-status .value.ok { color: #4ade80; }
   #drone-status .value.bad { color: #f87171; }
   #drone-status .value.warn { color: #fbbf24; }
+  #coverage-summary { font-size: 0.85rem; color: #9ca3af; margin-bottom: 8px; }
+  #coverage-canvas { background: #181d25; border: 1px solid #2a2f38; border-radius: 8px; margin-bottom: 20px; display: block; }
 </style>
 </head>
 <body>
@@ -38,6 +40,10 @@
     <div class="item"><span class="label">모드</span><span id="drone-mode" class="value">-</span></div>
     <div class="item"><span class="label">배터리</span><span id="drone-battery" class="value">-</span></div>
   </div>
+
+  <h2>커버리지 그리드 (스캔 진행)</h2>
+  <div id="coverage-summary">아직 수신된 커버리지 데이터가 없습니다.</div>
+  <canvas id="coverage-canvas" width="400" height="200"></canvas>
 
   <h2>실시간 카메라</h2>
   <img id="camera" alt="실시간 카메라 화면">
@@ -67,6 +73,9 @@
   const emptyEl = document.getElementById('empty');
   const taggedRowsEl = document.getElementById('tagged-rows');
   const taggedEmptyEl = document.getElementById('tagged-empty');
+  const coverageSummaryEl = document.getElementById('coverage-summary');
+  const coverageCanvas = document.getElementById('coverage-canvas');
+  const coverageCtx = coverageCanvas.getContext('2d');
   const cameraEl = document.getElementById('camera');
   const cameraEmptyEl = document.getElementById('camera-empty');
   const droneConnectedEl = document.getElementById('drone-connected');
@@ -110,6 +119,8 @@
         } else {
           render(parsed);
         }
+      } else if (parsed.covered_cells) {
+        renderCoverageGrid(parsed);
       } else {
         renderDroneStatus(parsed);
       }
@@ -175,6 +186,33 @@
         <td>${fmt(mz)}</td>
       `;
       taggedRowsEl.appendChild(tr);
+    }
+  }
+
+  function renderCoverageGrid(status) {
+    const cells = status.covered_cells || [];
+    coverageSummaryEl.textContent =
+      `${status.covered_cell_count}칸 스캔 완료 (칸당 ${status.cell_size_m}m, 추정 면적 ${status.estimated_area_m2}㎡)`;
+
+    const ctx = coverageCtx;
+    ctx.clearRect(0, 0, coverageCanvas.width, coverageCanvas.height);
+    if (!cells.length) return;
+
+    // 격자 좌표계를 캔버스에 맞춰 자동 스케일 (커버된 칸들의 bounding box 기준)
+    const xs = cells.map(c => c[0]);
+    const ys = cells.map(c => c[1]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const gridW = maxX - minX + 1;
+    const gridH = maxY - minY + 1;
+    const cellPx = Math.max(2, Math.min(
+      Math.floor(coverageCanvas.width / gridW),
+      Math.floor(coverageCanvas.height / gridH)
+    ));
+
+    ctx.fillStyle = '#4ade80';
+    for (const [gx, gy] of cells) {
+      ctx.fillRect((gx - minX) * cellPx, (gy - minY) * cellPx, cellPx - 1, cellPx - 1);
     }
   }
 

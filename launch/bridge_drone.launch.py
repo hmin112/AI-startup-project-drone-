@@ -128,4 +128,13 @@ def generate_launch_description():
             name='crack_fusion_node',
             output='screen',
         ),
+        # 원본 영상을 계속 보내는 대신 격자 칸 단위 스캔 완료 여부만 발행
+        # (커버리지 그리드, docs 5번 항목). map/base_link TF가 없으면
+        # 조용히 대기.
+        Node(
+            package='lidar_mapping',
+            executable='coverage_grid_node',
+            name='coverage_grid_node',
+            output='screen',
+        ),
     ])
