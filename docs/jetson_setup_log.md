@@ -358,6 +358,35 @@ UAV-PDD2023 자체 도메인 적응은 확실히 성공(mask mAP50 0→0.338)했
 
 전부 GitHub에 커밋/푸시 완료.
 
+## 2026-08-08~09 세션 — dacl10k 발견, catastrophic forgetting 재확인, DeepCrack+dacl10k 동시 학습으로 해결
+
+목표: "근접 촬영+드론앵글+세그멘테이션" 데이터셋을 계속 찾다가 훨씬 좋은 후보(dacl10k)를 발견, 시도하는 과정에서 UAV-PDD2023 때와 같은 forgetting 문제가 재발했고 이번엔 근본 원인(순차 파인튜닝)까지 짚어서 해결함.
+
+**dacl10k 발견**: WACV 2024 벤치마크, 9,920장(train 6,935/val 975/test 2,010), 19클래스 멀티라벨 세그멘테이션, 실제 독일 교량 점검 아카이브(엔지니어링 업체+지자체, 2000~2020년). 논문에 "close-range or telephoto images provide local high-resolution details for crack recognition"이라고 명시 — 지금까지 시도한 것 중 처음으로 "근접 촬영"이 문헌에 확인된 데이터셋. CC BY-NC 4.0, AWS S3(`https://dacl10k.s3.eu-central-1.amazonaws.com/dacl10k-challenge/dacl10k_v2_devphase.zip`, 5.1GB)에서 가입 없이 직접 다운로드. labelme 포맷 폴리곤(`{"label": "Crack", "shape_type": "polygon", "points": [[x,y],...]}`) — Crack 클래스만 추출(`scripts/convert_dacl10k_to_yolo_seg.py`), Crack이 있는 이미지만 사용(train 1,727장/val 254장, 3,626 인스턴스 — 나머지 대다수는 다른 손상 유형이라 이 프로젝트엔 배경 이미지로서의 가치가 낮다고 판단해서 제외).
+
+**dacl10k 단독 파인튜닝 (`batch=4 workers=1`, DeepCrack보다 큰 1600x1200 이미지라 처음부터 안전 설정 적용)**:
+- swap 24%→68%까지 완만하게 상승(급격한 스파이크 없음), 50 에포크 전부 정상 완주(조기 종료 없음)
+- **자체 val 기준**: mask mAP50 0.028(원본)→0.203(7배 이상) — 확실한 개선
+- **DeepCrack 교차검증(baseline 비교로 forgetting 여부 확인하는 이번 세션 표준 절차)**: 0.194(원본)→0.016 — UAV-PDD2023(6.24e-07까지 붕괴)만큼 심각하진 않지만 명백한 퇴보. **순차 파인튜닝은 매번 이전 도메인을 잊는다**는 패턴이 이번에도 재현됨.
+
+**근본 해결 — DeepCrack+dacl10k 동시(joint) 학습**: 순차 파인튜닝(A로 튜닝→B로 다시 튜닝)이 아니라, 두 데이터셋을 처음부터 하나의 학습 세트로 합쳐서(`datasets/combined_yolo/`, DeepCrack 537장 + dacl10k Crack 1,981장 = train 2,027장/val 491장, 파일명 접두사가 서로 달라 충돌 없이 단순 복사로 병합) `crack_seg_v1`에서 한 번만 파인튜닝. 같은 안전 설정(batch=4, workers=1)으로 50 에포크 전부 완주, swap 24%→71%로 역시 위험 수위 안 감(이번 세션 3번째 대형 학습인데도 매번 같은 안전 프로토콜로 안정적).
+
+**결과 — forgetting 없이 양쪽 다 개선**:
+| | DeepCrack val mask mAP50 | dacl10k val mask mAP50 |
+|---|---|---|
+| 원본(crack_seg_v1) | 0.194 | 0.028 |
+| 각 데이터셋 단독 파인튜닝(최고 성능) | 0.403 | 0.203 |
+| 반대쪽에서 평가(forgetting 확인용) | 0.016 (dacl10k 튜닝 모델) | — |
+| **동시(joint) 학습** | **0.328** | **0.171** |
+
+동시 학습이 각 전용 모델의 최고 성능엔 살짝 못 미치지만(당연한 트레이드오프 — 한 도메인에 올인하지 않으니까), **forgetting이 전혀 없고 원본 대비 양쪽 다 크게 개선**(DeepCrack +69%, dacl10k +511%). 이 프로젝트처럼 여러 소스의 크랙 데이터를 계속 추가해나가야 하는 상황에선 순차 파인튜닝보다 "매번 전체 데이터를 합쳐서 재학습"하는 쪽이 안전하다는 걸 실측으로 확인 — **앞으로 새 크랙 데이터셋을 추가할 때도 이 방식(합쳐서 재학습)을 기본으로 삼을 것**.
+
+**채택**: `models/crack_seg_v3_combined_finetune.pt`로 커밋(Git LFS), `launch/bridge_drone.launch.py`의 `vision_ai` 기본 모델 교체(v2→v3). 학습 기록은 `models/training_records/combined_finetune_v1/`.
+
+**메모리 안전 노트**: dacl10k(1600x1200)와 UAV-PDD2023(2592x1944) 둘 다 DeepCrack(384x544)보다 훨씬 큰 이미지라, 처음부터 `batch=4 workers=1`로 시작하는 게 안전함을 확인 — 이미지가 크면 `batch=8 workers=2`(DeepCrack 땐 안전했던 설정)도 위험할 수 있음(UAV-PDD2023 1차 시도에서 swap 24%→62%로 7분 만에 치솟아 수동 개입했던 사례). **앞으로 새 데이터셋 학습 시 이미지 해상도부터 확인하고 크면(1000px 이상 등) 처음부터 `batch=4 workers=1`로 시작할 것.**
+
+전부 GitHub에 커밋/푸시 완료. 이 세션은 사용자가 잠든 사이 자율적으로 진행 지시를 받아 판단부터 실행까지 전부 자동으로 수행함(dacl10k 채택 여부, 모델 커밋 여부 등).
+
 ## 다음에 이어서 할 것
 
 - [x] ~~Jetson 응답 없음 문제 해결~~ — 전원 재인가로 복구, watchdog으로 재발 방지
@@ -370,7 +399,8 @@ UAV-PDD2023 자체 도메인 적응은 확실히 성공(mask mAP50 0→0.338)했
 - [x] ~~`lidar_mapping`을 D455F 기반 Visual SLAM(RTAB-Map)으로 재구현~~ — 2026-08-07 완료, 구조적 검증까지 끝남
 - [x] ~~2D→3D 크랙 태깅/퓨전 로직 구현~~ — 2026-08-07 완료, 합성 TF 체인으로 수학 검증까지 끝남
 - [x] ~~드론 앵글 데이터셋 파인튜닝~~ — BCD/UAV-PDD2023 둘 다 세그멘테이션 부적합 확인, DeepCrack으로 대체 파인튜닝 완료(mask mAP50 0.194→0.403, baseline 비교로 효과 검증). 단, DeepCrack이 진짜 드론 앵글인지는 미확인 — 아래 항목 참고
-- [x] ~~진짜 드론 앵글 세그멘테이션 데이터 확보 시도(UAV-PDD2023)~~ — 시도했으나 폐기(아래 세션 기록), 여전히 미해결로 남음
+- [x] ~~진짜 드론 앵글 세그멘테이션 데이터 확보 시도(UAV-PDD2023)~~ — 폐기, 대신 dacl10k 발견(아래 참고)
+- [x] ~~dacl10k 발견 + DeepCrack와 동시 학습으로 catastrophic forgetting 해결~~ — `crack_seg_v3_combined_finetune.pt`로 채택, launch 기본 모델 교체 완료(mask mAP50 DeepCrack 0.194→0.328, dacl10k 0.028→0.171, forgetting 없음)
 - [x] ~~web_dashboard에 3D 태깅 결과 연동~~ — 완료, 겸사겸사 기존 `self._clients` 네이밍 충돌 버그(크래시)도 발견/수정. 브라우저 실제 렌더링 육안 확인은 다음 하드웨어 세션에
 - [x] ~~2026-08-07 세션 코드 리뷰(정확성) + 회귀 버그 수정~~ — vision_ai executor 재블로킹, crack_fusion TF 자기봉쇄 등 2개 심각 버그 포함 6개 전부 수정
 - [x] ~~커버리지 그리드 기능 구현~~ — `coverage_grid_node` 신규, `web_dashboard` 캔버스 시각화 연동. 합성 TF로 계산 로직만 검증, 실제 해상도 적절성은 라이브 검증 필요

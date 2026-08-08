@@ -115,7 +115,23 @@ bridge_drone_ws/
 
 4. **센서 캘리브레이션**: 하드웨어 변경으로 LiDAR extrinsic은 더 이상 불필요해짐 — 남은 건 **D455F↔`base_link` extrinsic**(카메라 장착 위치/자세) 하나. `launch/bridge_drone.launch.py`에 `base_link→camera_link` static TF 자리는 만들어뒀지만(2026-08-07, 예전 `base_link→laser`와 같은 패턴) 현재 값(z=0.05m)은 실측 전 임시값. 이거 없으면 위 2번(3D 태깅)이 부정확해짐.
 
-5. **YOLO 학습 데이터셋 구축** — **1차 확장 완료(2026-08-07)**: crack-seg(4,029장) 기반 `crack_seg_v1` 다음 단계로 드론 앵글 데이터셋(BCD, UAV-PDD2023) 확장을 검토했으나 **둘 다 세그멘테이션 학습에 부적합하다고 확인**됨 — BCD는 실측 결과 SDNET2018과 동일하게 224×224 패치 단위 균열 있음/없음 분류 데이터셋(bbox/마스크 없음), UAV-PDD2023은 PASCAL VOC bbox만 있고 마스크 없음(도로 포장 결함이라 도메인도 교량과 다름). 대신 **DeepCrack**(537장, 픽셀 단위 세그멘테이션 마스크, `yhlleo/DeepCrack`, 비상업적 연구/교육 목적 제한)을 마스크→YOLO 폴리곤으로 변환(`scripts/convert_deepcrack_to_yolo_seg.py`)해서 `crack_seg_v1`에서 파인튜닝 → `models/crack_seg_v2_deepcrack_finetune.pt`. **동일 DeepCrack val(237장) 기준 파인튜닝 전/후 비교로 실제 효과 확인**: mask mAP50 0.194→0.403(2배 이상), recall 0.223→0.411. 단, DeepCrack이 실제 드론 각도 촬영인지는 미확인(문헌상 지상/근접 촬영 가능성) — 진짜 드론 앵글 검증은 여전히 필요.
+5. **YOLO 학습 데이터셋 구축** — **1차 확장(2026-08-07)**: crack-seg(4,029장) 기반 `crack_seg_v1` 다음 단계로 드론 앵글 데이터셋(BCD, UAV-PDD2023) 확장을 검토했으나 **둘 다 세그멘테이션 학습에 부적합하다고 확인**됨 — BCD는 실측 결과 SDNET2018과 동일하게 224×224 패치 단위 균열 있음/없음 분류 데이터셋(bbox/마스크 없음), UAV-PDD2023은 PASCAL VOC bbox만 있고 마스크 없음(도로 포장 결함이라 도메인도 교량과 다름). 대신 **DeepCrack**(537장, 픽셀 단위 세그멘테이션 마스크, `yhlleo/DeepCrack`, 비상업적 연구/교육 목적 제한)을 마스크→YOLO 폴리곤으로 변환(`scripts/convert_deepcrack_to_yolo_seg.py`)해서 `crack_seg_v1`에서 파인튜닝 → `crack_seg_v2`. 동일 DeepCrack val(237장) 기준 mask mAP50 0.194→0.403(2배 이상).
+
+   **UAV-PDD2023 재시도 + catastrophic forgetting 발견(2026-08-07)**: bbox를 직사각형 폴리곤으로 근사해서 보조 데이터로 파인튜닝 시도(`scripts/convert_uavpdd_to_yolo_seg.py`) — UAV-PDD2023 자체 도메인은 mask mAP50 0→0.338로 크게 개선됐지만, 같은 모델을 DeepCrack에 돌려보니 0.194(원본)보다도 나쁜 6.24e-07로 붕괴. **순차(sequential) 파인튜닝이 이전 도메인을 잊어버리는 문제**를 실측으로 확인, 이 모델은 폐기.
+
+   **dacl10k 발견 + 2차 시도(2026-08-08~09)**: 계속 데이터셋을 찾다가 **dacl10k**(WACV 2024, 9,920장, 62,327개 라벨, 19클래스 중 Crack 포함, 실제 교량 점검 사진 — 논문에 "close-range or telephoto images provide local high-resolution details for crack recognition"으로 명시돼 있어 이 프로젝트의 근접 촬영 조건과 지금까지 중 가장 잘 맞음, CC BY-NC 4.0, AWS S3에서 직접 다운로드 가능) 발견. Crack 클래스만 추출(`scripts/convert_dacl10k_to_yolo_seg.py`, train 1,727장/val 254장, 3,626 인스턴스)해서 `crack_seg_v1`에서 단독 파인튜닝 → dacl10k 자체 val 기준 mask mAP50 0.028(원본)→0.203(7배 이상)로 확실한 개선. **그런데 DeepCrack 교차검증에서 다시 forgetting 확인**: 0.194(원본)→0.016으로 하락(UAV-PDD2023만큼 심각하진 않지만 명백한 퇴보).
+
+   **DeepCrack+dacl10k 동시(joint) 학습으로 해결(2026-08-09)**: 순차 파인튜닝이 반복해서 이전 도메인을 잊는 패턴을 보이자, 두 데이터셋(DeepCrack 537장 + dacl10k Crack 1,981장 = train 2,027장/val 491장)을 하나로 합쳐서 `crack_seg_v1`에서 한 번에 학습(`crack_seg_v3_combined_finetune.pt`). **결과 — forgetting 없이 양쪽 다 개선**:
+   | | DeepCrack val mask mAP50 | dacl10k val mask mAP50 |
+   |---|---|---|
+   | 원본(crack_seg_v1) | 0.194 | 0.028 |
+   | 각 데이터셋 단독 파인튜닝 | 0.403 | 0.203 |
+   | 반대쪽 데이터셋에서 단독 튜닝 모델 평가(forgetting) | 0.016 (dacl10k 튜닝→DeepCrack) | 6.24e-07 (UAV-PDD 튜닝→DeepCrack, 참고용) |
+   | **동시(joint) 학습** | **0.328** | **0.171** |
+
+   동시 학습은 각 도메인 전용 파인튜닝의 최고 성능(0.403, 0.203)에는 약간 못 미치지만, forgetting 없이 원본 대비 양쪽 다 크게 개선(DeepCrack +69%, dacl10k +511%)됐고 어느 한쪽도 원본보다 나빠지지 않음 — **이걸 채택해서 `models/crack_seg_v3_combined_finetune.pt`로 launch 기본 모델 교체**. 학습/평가 전부 젯슨에서 안전 설정(batch=4, workers=1)으로 진행, watchdog으로 메모리 안전 확인(50 에포크 완주, swap 최대 71%로 위험 수위 안 감). 상세 기록은 `docs/jetson_setup_log.md` 2026-08-09 세션 참고.
+
+   **여전히 남은 문제**: dacl10k도 진짜 드론 촬영인지는 확인 안 됨(점검자가 찍은 근접/망원 사진이라는 것만 확인) — "드론 각도"라는 좁은 의미의 검증은 여전히 안 됐지만, "근접 촬영 + 실제 교량 + 세그멘테이션"이라는 이 프로젝트에 더 중요한 조건은 지금까지 중 가장 잘 만족함.
    **UAV-PDD2023 보조 데이터 실험(2026-08-07, 폐기)**: bbox를 직사각형 폴리곤으로 변환(`scripts/convert_uavpdd_to_yolo_seg.py`)해서 `crack_seg_v1`에서 별도로 파인튜닝 시도(`uavpdd_finetune_v2`, 커밋 안 함). UAV-PDD2023 자체 val 기준으로는 mask mAP50 ~0→0.338로 극적으로 개선됐지만(도메인 자체 적응은 성공), **같은 모델을 DeepCrack val에 돌려보니 mask mAP50이 0.194(원본)/0.403(DeepCrack 튜닝)보다 훨씬 나쁜 ~0(6.24e-07)로 붕괴** — 직사각형 마스크 + 도메인이 크게 다른(고도 30m 도로뷰 vs 근접 균열) 데이터로 파인튜닝하다 catastrophic forgetting 발생, 근접 촬영 세그멘테이션 능력을 거의 완전히 상실함. **이 프로젝트의 실제 촬영 조건(D455F로 80cm~1m 근접)과 UAV-PDD2023의 도메인(30m 상공 도로뷰)이 애초에 잘 안 맞다는 것도 원인** — "드론에서 찍었다"는 것만으로 도메인이 맞다고 가정하면 안 됨. 모델은 커밋하지 않고 폐기, 이 실패 사례만 기록. **여전히 필요한 것**: 근접 촬영 + 드론(또는 유사) 앵글 + 실제 세그멘테이션 마스크를 동시에 만족하는 데이터셋 — 아직 못 찾음.
 
 6. **배터리/비행시간 예산과 임무 계획**: 다리 규모 대비 한 번에 스캔 가능한 범위, 배터리 교체 주기, 비행 경로 플래닝(수동 조종 vs 사전 경로 자동 비행) 논의 필요. **제약사항 실측 확보(2026-07-13)**: 1번 항목 실측 결과 카메라-구조물 간 최소 80cm~1m 이상 거리를 유지해야 depth 측정이 정확함 — 비행 경로/접근 거리 플래닝 시 이 최소거리를 하한으로 반영해야 함.

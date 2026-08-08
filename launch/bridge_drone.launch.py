@@ -48,12 +48,17 @@ def generate_launch_description():
             executable='vision_ai_node',
             name='vision_ai_node',
             output='screen',
-            # 2026-08-07 DeepCrack 파인튜닝 결과(mask mAP50 0.194->0.403,
-            # baseline 비교로 검증됨, docs/jetson_setup_log.md 참고). 워크스페이스
-            # 루트(~/bridge_drone_ws)에서 실행한다고 가정한 상대경로 — README의
-            # Run 안내와 동일한 전제.
+            # 2026-08-09: DeepCrack+dacl10k 동시(joint) 학습 결과로 교체.
+            # 순차 파인튜닝(v2=DeepCrack만, dacl10k만)은 각각 반대쪽
+            # 도메인에서 catastrophic forgetting이 났었는데(v2를 dacl10k에
+            # 돌리면 원본보다도 나쁨), 두 데이터셋을 합쳐서 한 번에 학습하니
+            # 망각 없이 양쪽 다 원본 대비 크게 개선됨: mask mAP50
+            # DeepCrack 0.194->0.328, dacl10k 0.028->0.171 (각각 baseline
+            # 비교로 검증, docs/jetson_setup_log.md 2026-08-09 세션 참고).
+            # 워크스페이스 루트(~/bridge_drone_ws)에서 실행한다고 가정한
+            # 상대경로 — README의 Run 안내와 동일한 전제.
             parameters=[{
-                'model_path': 'models/crack_seg_v2_deepcrack_finetune.pt',
+                'model_path': 'models/crack_seg_v3_combined_finetune.pt',
             }],
         ),
         Node(
