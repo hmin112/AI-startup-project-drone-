@@ -137,4 +137,14 @@ def generate_launch_description():
             name='coverage_grid_node',
             output='screen',
         ),
+        # D455F 원본 컬러 영상을 H.264로 저장 (착륙 후 정밀 3D 재구성용
+        # 원본 데이터, docs 5번/8번 항목). 개발/벤치 테스트 중에도 계속
+        # 녹화되니 디스크 용량 주기적으로 확인할 것 — 필요 없으면 이
+        # Node()를 빼고 실행.
+        Node(
+            package='vision_ai',
+            executable='recorder_node',
+            name='recorder_node',
+            output='screen',
+        ),
     ])

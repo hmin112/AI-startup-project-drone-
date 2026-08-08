@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 models/*.engine
 .claude/
+recordings/
+runs/
+datasets/

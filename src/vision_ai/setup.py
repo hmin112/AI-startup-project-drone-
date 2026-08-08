@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'vision_ai_node = vision_ai.vision_ai_node:main',
+            'recorder_node = vision_ai.recorder_node:main',
         ],
     },
 )
