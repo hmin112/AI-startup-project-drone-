@@ -109,10 +109,13 @@ bridge_drone_ws/
 프로젝트명이 "균열 **탐지**"가 아니라 "결함 **측정**"이라는 점에서, 아래 항목들은 문서에 명시가 안 되어 있지만 실제 구현엔 꼭 필요해 보여요.
 
 1. ~~**균열 크기 정량화 로직**~~ — **구현 완료(2026-07-12)**: `vision_ai/measurement.py`의 `measure_distance_mm()`이 D455F depth + intrinsic으로 픽셀 두 점을 3D 좌표로 변환해 실거리(mm) 계산. YOLO seg 모델의 마스크 윤곽에 `cv2.minAreaRect`를 적용해 균열 방향에 맞는 회전 사각형의 두 변을 `length_mm`/`width_mm`로 발행. **정확도 실측 검증(2026-07-13)**: 우드락에 자로 잰 55mm 흠집을 내서 비교 — 카메라~피사체 약 50cm에서는 depth가 실제 거리의 약 2배로 측정돼 계산값도 약 2배(108mm) 틀어짐(D455F 최소 인식거리 근처 스테레오 매칭 오류로 추정), **약 1.4m 거리에서는 30프레임 전부 유효했고 평균 59.1mm(오차 7.5%)로 실용적인 정확도** 확인. → **카메라-구조물 최소 안전거리 80cm~1m 이상 필요**(6번 항목 미션 플래닝에도 반영).
+**추가 위험 요소(2026-08-09, 미검증)**: 이건 `vision_ai`의 실시간 mm 측정과는 별개로, **착륙 후 3D 재구성**(`rtabmap-export --texture`)에서 3~8mm짜리 가는 균열이 80cm~1.4m 촬영 거리의 카메라 해상도로 텍스처에 선명하게 찍힐지는 GSD(픽셀당 실제 거리) 문제라 실측 전엔 알 수 없음 — 흐릿하게 뭉개져서 3D 모델 텍스처만 봐서는 균열이 잘 안 보일 가능성 있음. `vision_ai`의 실시간 세그멘테이션+mm 측정(이 항목)은 이미 검증됐지만, 그 결과를 3D 모델 위에 "시각적으로도" 선명하게 보여주는 것과는 다른 문제.
 
 2. ~~**크랙 위치를 3D 맵에 정합(태깅)하는 로직**~~ — **구현 완료(2026-08-07)**: `src/lidar_mapping/lidar_mapping/crack_fusion_node.py` 신규 추가. `vision_ai_node`가 각 탐지의 bbox 중심을 카메라 광학 프레임 3D 좌표(`center_camera_m`, `measurement.deproject_point_m()` 재사용)로 계산해 `/vision_ai/detections`에 포함시키고, `crack_fusion_node`가 tf2로 `camera_color_optical_frame → ... → map` 체인을 조회해 `/crack_fusion/tagged_detections`(map 좌표 `map_position_m` 포함)로 재발행. TF 체인이 아직 없으면(SLAM 미기동 등) 해당 탐지는 조용히 스킵. **합성 TF 체인(map→odom→base_link→camera_link z=0.05→camera_color_optical_frame, 전부 항등변환+z오프셋 하나)으로 젯슨에서 검증**: 입력 `[0.1, 0.2, 1.5]` → 출력 `map_position_m: [0.1, 0.2, 1.55]`로 기대값과 정확히 일치. 실제 SLAM이 붙은 라이브 환경(카메라 이동 필요)에서의 검증은 아직 — 8번 항목 3(라이브 TF 검증)과 함께 다음 하드웨어 세션에서. **알려진 근사**: `/vision_ai/detections`엔 타임스탬프가 없어서 탐지 시점 대신 "최신 사용 가능한" TF를 씀(정밀도가 중요해지면 개선 필요, 코드 주석 참고).
 
 3. **GPS 음영구역에서의 위치추정** — **재구현 완료(2026-08-07)**: LiDAR 제외로 라이다 스캔매칭(`slam_toolbox`) 전제가 무효화되면서 재설계함. 원래 계획이던 `drone_core`(MAVROS `local_position/pose` 기반 `odom→base_link`) + 라이다 SLAM(`map→odom`) 조합 대신, **RTAB-Map이 `odom→base_link`(자체 Visual Odometry, `rgbd_odometry`)와 `map→odom`(맵빌딩+루프클로징, `rtabmap`) 둘 다 D455F만으로 전담**하도록 변경 — `drone_core`/MAVROS와 완전히 독립. 이유: 최종 FC가 **Betaflight**로 확정됐는데 Betaflight는 MAVROS와 정상 통신하지 않을 가능성이 높아서(`drone_core`가 실제로 pose 데이터를 못 받을 수 있음), 그 위에 SLAM을 얹는 원래 설계가 위험하다고 판단. **열린 문제**: 나중에 MAVROS/Betaflight 문제가 해결되면 `drone_core`와 `rgbd_odometry` 둘 다 `odom→base_link`를 쏘게 되는 충돌이 생김 — 그때 `drone_core`의 TF 발행을 없애거나 `robot_localization`으로 융합할지 결정 필요. **원격 세션이라 카메라 정지 상태로만 검증(파이프라인 크래시 없음, `/odom` 발행 확인, 메모리 안전 확인) — 실제 이동 중 TF 정상 갱신/드리프트는 미검증.**
+
+**새로운 위험 요소(2026-08-09, 아직 실측 전 — 논리적 추론으로 식별)**: **콘크리트 교량 하부는 시각적 특징(texture)이 거의 없는 표면**이라, Visual SLAM(`rgbd_odometry`)이 추적할 특징점을 못 찾아 드리프트하거나 트래킹을 완전히 잃을 위험이 이론적으로 큼 — 텍스처 없는 균일한 표면은 Visual SLAM 전반에서 잘 알려진 실패 조건. 실제로 이 프로젝트에서도 2026-07-13에 "depth 유효 픽셀 16.7%(안 좋은 장면) → 95%(평평한 벽으로 재조정)"로 장면에 따라 결과가 크게 갈린 전례가 있어서, 같은 문제가 SLAM 트래킹에도 그대로 적용될 가능성이 높음. **다음 하드웨어 세션에서 라이브 검증할 때 특히 주의해서 확인할 것** — 필요하면 조명/각도 조정, 또는 텍스처가 있는 임시 마커 부착 등의 완화책 고려.
 
 4. **센서 캘리브레이션**: 하드웨어 변경으로 LiDAR extrinsic은 더 이상 불필요해짐 — 남은 건 **D455F↔`base_link` extrinsic**(카메라 장착 위치/자세) 하나. `launch/bridge_drone.launch.py`에 `base_link→camera_link` static TF 자리는 만들어뒀지만(2026-08-07, 예전 `base_link→laser`와 같은 패턴) 현재 값(z=0.05m)은 실측 전 임시값. 이거 없으면 위 2번(3D 태깅)이 부정확해짐.
 
@@ -162,7 +165,7 @@ bridge_drone_ws/
 
 - rosbridge vs 커스텀 WebSocket 중 선택
 - ~~커버리지 그리드 해상도~~ — 구현 완료(2026-08-08), 기본 1.5m 칸 크기. 실제 비행에서 이 해상도가 적절한지는 라이브 검증 필요
-- **카메라를 실제로 움직이며 RTAB-Map 라이브 검증** (다음 하드웨어 세션 최우선) — `odom→base_link`/`map→odom` TF가 정상 갱신되는지, 루프클로저가 실제로 잡히는지, `vision_ai`와 동시 구동 시 GPU/메모리 여유 확인 (8번 항목 3)
+- **카메라를 실제로 움직이며 RTAB-Map 라이브 검증** (다음 하드웨어 세션 최우선) — `odom→base_link`/`map→odom` TF가 정상 갱신되는지, 루프클로저가 실제로 잡히는지, `vision_ai`와 동시 구동 시 GPU/메모리 여유 확인 (8번 항목 3). **특히 콘크리트 표면의 텍스처 부족으로 트래킹이 얼마나 잘/안 되는지 중점 확인** (8번 항목 3의 새 위험 요소 참고)
 - 센서 fusion/캘리브레이션 담당자·일정 (D455F↔`base_link` extrinsic만 남음, 8번 항목 4)
 - ELRS 2.4GHz ↔ WiFi 2.4GHz 간섭 실측 일정 (8번 항목 7)
 - vision_ai 리팩터링 후 mm 측정 정확도 재검증(우드락 재실험 등) — 원격 세션이라 실물 없이는 확인 못함 (8번 항목 1)
