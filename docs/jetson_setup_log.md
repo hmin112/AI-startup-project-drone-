@@ -469,3 +469,11 @@ UAV-PDD2023 자체 도메인 적응은 확실히 성공(mask mAP50 0→0.338)했
 **여전히 미검증**: 이 튜닝이 실제로 트래킹 안정성을 개선하는지는 카메라를 움직인 라이브 테스트가 있어야 확인 가능 — 파라미터가 정확히 적용된다는 배관 검증까지만 이번 세션에서 완료.
 
 전부 GitHub에 커밋/푸시 완료.
+
+## 2026-08-12 세션 (계속) — D455F extrinsic을 launch argument로 분리
+
+`base_link→camera_link` static TF의 6개 값(x,y,z,roll,pitch,yaw)이 `launch/bridge_drone.launch.py` 안에 하드코딩돼 있었음(현재는 z=0.05만 있고 나머진 전부 0인 실측 전 임시값). RTAB-Map 파라미터는 YAML로 뺐지만, `static_transform_publisher`는 `arguments`(커맨드라인 인자)로만 값을 받아서 YAML 파라미터 파일 방식이 안 맞음 — 대신 `DeclareLaunchArgument`/`LaunchConfiguration`으로 6개 다 launch 인자화.
+
+**결과**: 나중에 실측 완료되면 `launch/bridge_drone.launch.py`를 전혀 안 건드리고 `ros2 launch launch/bridge_drone.launch.py camera_z:=0.08 camera_pitch:=0.15` 처럼 커맨드라인에서 바로 반영 가능 — 코드 모르는 팀원도 값만 알면 적용 가능해짐. 젯슨에서 두 가지 다 실측 검증: (1) 인자 없이 기본값(z=0.05)이 그대로 나오는지, (2) `camera_z:=0.12 camera_pitch:=0.15` 오버라이드가 실제로 `tf2_echo base_link camera_link`에 정확히 반영되는지(Translation z=0.120, RPY pitch=0.150rad=8.594° 정확히 일치) — 둘 다 확인.
+
+전부 GitHub에 커밋/푸시 완료.

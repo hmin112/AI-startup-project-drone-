@@ -1,6 +1,8 @@
 import os
 
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 # rgbd_odometry/rtabmap가 구독하는 카메라 토픽 (단일 캡처 지점인
@@ -21,7 +23,22 @@ RTABMAP_TUNING_FILE = os.path.join(
 
 
 def generate_launch_description():
-    return LaunchDescription([
+    # D455F의 base_link 기준 장착 위치(6자유도) — 실측 전 임시값(전부
+    # 0, z만 0.05). 값 자체가 아니라 인자로 뺀 이유: 실측 완료되면
+    # launch.py를 건드리지 않고 커맨드라인에서 바로 덮어쓸 수 있게 하려는
+    # 것 — 예) `ros2 launch launch/bridge_drone.launch.py
+    # camera_z:=0.08 camera_pitch:=0.12`. 이 값들은 base_to_camera_tf
+    # 노드(아래)에서만 쓰임.
+    camera_extrinsic_args = [
+        DeclareLaunchArgument('camera_x', default_value='0.0', description='D455F x offset from base_link (m)'),
+        DeclareLaunchArgument('camera_y', default_value='0.0', description='D455F y offset from base_link (m)'),
+        DeclareLaunchArgument('camera_z', default_value='0.05', description='D455F z offset from base_link (m)'),
+        DeclareLaunchArgument('camera_roll', default_value='0.0', description='D455F roll from base_link (rad)'),
+        DeclareLaunchArgument('camera_pitch', default_value='0.0', description='D455F pitch from base_link (rad)'),
+        DeclareLaunchArgument('camera_yaw', default_value='0.0', description='D455F yaw from base_link (rad)'),
+    ]
+
+    return LaunchDescription(camera_extrinsic_args + [
         # D455F 단일 캡처 지점. vision_ai/SLAM 등 카메라가 필요한 모든 노드는
         # pyrealsense2로 디바이스를 직접 열지 않고 이 노드가 발행하는 토픽을
         # 구독한다 (카메라가 하나뿐이라 두 프로세스가 동시에 열면 충돌 위험).
@@ -82,19 +99,24 @@ def generate_launch_description():
             name='web_dashboard_node',
             output='screen',
         ),
-        # D455F의 드론 바디 기준 장착 위치. 실측 전까지의 대략값 —
-        # 예전 base_link->laser(RPLIDAR)와 같은 자리(2026-08-07 하드웨어
-        # 최종화로 LiDAR 제외, D455F가 그 역할까지 겸함).
-        # camera_link 밑으로는(camera_link->camera_color_optical_frame 등)
-        # realsense2_camera_node가 자체 발행하므로 base_link->camera_link만
-        # 있으면 TF 체인이 완성된다(실측 확인 완료).
+        # D455F의 드론 바디 기준 장착 위치. 실측 전까지의 대략값(위
+        # camera_extrinsic_args 참고) — 예전 base_link->laser(RPLIDAR)와
+        # 같은 자리(2026-08-07 하드웨어 최종화로 LiDAR 제외, D455F가 그
+        # 역할까지 겸함). camera_link 밑으로는(camera_link->
+        # camera_color_optical_frame 등) realsense2_camera_node가 자체
+        # 발행하므로 base_link->camera_link만 있으면 TF 체인이
+        # 완성된다(실측 확인 완료).
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
             name='base_to_camera_tf',
             arguments=[
-                '--x', '0', '--y', '0', '--z', '0.05',
-                '--roll', '0', '--pitch', '0', '--yaw', '0',
+                '--x', LaunchConfiguration('camera_x'),
+                '--y', LaunchConfiguration('camera_y'),
+                '--z', LaunchConfiguration('camera_z'),
+                '--roll', LaunchConfiguration('camera_roll'),
+                '--pitch', LaunchConfiguration('camera_pitch'),
+                '--yaw', LaunchConfiguration('camera_yaw'),
                 '--frame-id', 'base_link', '--child-frame-id', 'camera_link',
             ],
         ),
