@@ -455,3 +455,17 @@ UAV-PDD2023 자체 도메인 적응은 확실히 성공(mask mAP50 0→0.338)했
 **의의**: 2026-08-07부터 미해결로 남아있던 "web_dashboard 브라우저 실제 렌더링" 항목이 완전히 해소됨 — 남은 건 이제 실제 SLAM 라이브 데이터(카메라 이동)로 3D 태깅/커버리지가 자연스럽게 채워지는지뿐이고, 그건 여전히 하드웨어 세션 필요.
 
 전부 GitHub에 커밋/푸시 완료.
+
+## 2026-08-12 세션 (계속) — RTAB-Map 저텍스처 튜닝 + config 파일 분리
+
+지난 세션에 논리적으로 식별한 "텍스처 없는 콘크리트 = SLAM 실패 조건" 위험에 실제로 대응. 웹 검색으로 나온 파라미터 추천은 요약 과정에서 이름이 부정확할 수 있다고 판단해서, **젯슨에 실제로 노드를 띄우고 `ros2 param list`/`describe`/`get`으로 진짜 파라미터명과 기본값을 직접 조회**하는 방식으로 검증(`rgbd_odometry`, `rtabmap` 둘 다 확인) — 이렇게 하니 `Vis/MinInliers`(기본 20), `GFTT/QualityLevel`(기본 0.001, 이미 관대함), `Odom/Strategy`(기본 0, Frame-to-Frame) 등 정확한 현재값을 근거로 조정할 수 있었음.
+
+**핵심 발견**: `Odom/Strategy`가 기본 0(Frame-to-Frame, 직전 프레임하고만 비교)인데, RTAB-Map 위키에 따르면 저텍스처/특징점 부족 환경엔 1(Frame-to-Map, 최근 키프레임 누적 로컬 맵과 비교)이 훨씬 강건함 — 일시적으로 특징점이 부족한 프레임을 지나가도 이전에 본 특징점으로 복구가 쉬워짐. 이걸 1로 바꾸고, `OdomF2M/MaxSize`(로컬 맵 크기) 2000→3000, `Vis/MinInliers` 20→15로 완화. `GFTT/QualityLevel`/`Vis/MaxFeatures` 등은 이미 적절하거나(전자) 8GB 젯슨 메모리 여유 우려로(후자) 그대로 둠 — 근거 없이 다 바꾸지 않고 확인된 것만 조정.
+
+**config 파일로 분리**: 원래 launch.py 안에 인라인 Python dict로 박혀있던 파라미터들 대신, `config/rtabmap_tuning.yaml` 신규 작성해서 `rgbd_odometry`/`rtabmap` 노드의 `parameters=[...]` 리스트에 dict와 함께 파일 경로로 넘김(ROS2 launch가 dict와 yaml 파일 혼합을 지원). **주의**: RTAB-Map의 모든 파라미터는 내부적으로 문자열 타입이라(`ros2 param describe` 결과 전부 `Type: string`), YAML에 `Odom/Strategy: 1`처럼 숫자로 쓰면 안 되고 반드시 `"1"`처럼 따옴표로 문자열 명시해야 함 — 안 그러면 YAML 파서가 정수로 해석해서 타입 불일치가 날 수 있음.
+
+**검증**: 젯슨에서 개별 노드 실행(`--params-file`)과 전체 `ros2 launch` 둘 다로 확인 — `ros2 param get`으로 재조회해서 `Odom/Strategy=1`, `OdomF2M/MaxSize=3000`, `Vis/MinInliers=15`가 두 노드 모두에 정확히 적용된 것 확인, 에러/경고 없음. (`ros2 node list`에 `/rgbd_odometry`가 순간적으로 두 번 뜬 적 있었는데 실제 프로세스는 하나뿐이었음 — discovery 타이밍상 흔한 일시적 현상, 실제 중복 실행 아님.)
+
+**여전히 미검증**: 이 튜닝이 실제로 트래킹 안정성을 개선하는지는 카메라를 움직인 라이브 테스트가 있어야 확인 가능 — 파라미터가 정확히 적용된다는 배관 검증까지만 이번 세션에서 완료.
+
+전부 GitHub에 커밋/푸시 완료.

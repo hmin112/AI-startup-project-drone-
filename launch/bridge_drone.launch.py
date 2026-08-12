@@ -1,3 +1,5 @@
+import os
+
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
@@ -9,6 +11,13 @@ CAMERA_REMAPPINGS = [
     ('depth/image', '/camera/camera/aligned_depth_to_color/image_raw'),
     ('rgb/camera_info', '/camera/camera/color/camera_info'),
 ]
+
+# 저텍스처(콘크리트) 표면 강건성 튜닝값 — config/rtabmap_tuning.yaml 참고,
+# 값 자체와 근거는 그 파일에 정리돼 있음. Python이 아니라 YAML로 빼서
+# 현장에서 팀원이 코드를 안 건드리고도 조정할 수 있게 함.
+RTABMAP_TUNING_FILE = os.path.join(
+    os.path.dirname(__file__), '..', 'config', 'rtabmap_tuning.yaml'
+)
 
 
 def generate_launch_description():
@@ -98,12 +107,15 @@ def generate_launch_description():
             executable='rgbd_odometry',
             name='rgbd_odometry',
             output='screen',
-            parameters=[{
-                'frame_id': 'base_link',
-                'odom_frame_id': 'odom',
-                'publish_tf': True,
-                'approx_sync': True,
-            }],
+            parameters=[
+                {
+                    'frame_id': 'base_link',
+                    'odom_frame_id': 'odom',
+                    'publish_tf': True,
+                    'approx_sync': True,
+                },
+                RTABMAP_TUNING_FILE,
+            ],
             remappings=CAMERA_REMAPPINGS,
         ),
         # 위 오도메트리 위에 루프클로징/맵빌딩을 얹어 map->odom 보정을
@@ -115,11 +127,14 @@ def generate_launch_description():
             executable='rtabmap',
             name='rtabmap',
             output='screen',
-            parameters=[{
-                'frame_id': 'base_link',
-                'subscribe_depth': True,
-                'approx_sync': True,
-            }],
+            parameters=[
+                {
+                    'frame_id': 'base_link',
+                    'subscribe_depth': True,
+                    'approx_sync': True,
+                },
+                RTABMAP_TUNING_FILE,
+            ],
             remappings=CAMERA_REMAPPINGS + [('odom', '/odom')],
             arguments=['-d'],
         ),
