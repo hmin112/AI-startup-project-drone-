@@ -31,3 +31,16 @@ source install/setup.bash
 ```bash
 ros2 launch launch/bridge_drone.launch.py
 ```
+
+카메라 장착 위치가 실측되면 코드를 안 고치고 커맨드라인에서 바로 반영 가능:
+```bash
+ros2 launch launch/bridge_drone.launch.py camera_z:=0.08 camera_pitch:=0.15
+```
+
+## Test
+
+순수 로직(하드웨어/ROS 실행 불필요)은 `pytest`로 바로 검증 가능:
+```bash
+pytest scripts/test/ src/lidar_mapping/test/   # cv2/numpy만 필요, Mac에서도 실행 가능
+pytest src/vision_ai/test/                     # pyrealsense2 필요 — 젯슨에서만 실행 가능
+```

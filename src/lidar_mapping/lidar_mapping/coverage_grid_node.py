@@ -1,11 +1,12 @@
 import json
-import math
 import threading
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from tf2_ros import Buffer, LookupException, TransformListener
+
+from lidar_mapping.coverage_math import build_status_payload, position_to_cell
 
 
 class CoverageGridNode(Node):
@@ -62,21 +63,13 @@ class CoverageGridNode(Node):
 
         x = transform.transform.translation.x
         y = transform.transform.translation.y
-        cell = (
-            math.floor(x / self._cell_size_m),
-            math.floor(y / self._cell_size_m),
-        )
+        cell = position_to_cell(x, y, self._cell_size_m)
 
         with self._lock:
             self._covered_cells.add(cell)
-            cells = list(self._covered_cells)
+            covered_cells = set(self._covered_cells)
 
-        status = {
-            'cell_size_m': self._cell_size_m,
-            'covered_cell_count': len(cells),
-            'estimated_area_m2': round(len(cells) * self._cell_size_m ** 2, 1),
-            'covered_cells': cells,
-        }
+        status = build_status_payload(covered_cells, self._cell_size_m)
         self._status_pub.publish(String(data=json.dumps(status)))
 
 

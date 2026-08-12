@@ -477,3 +477,25 @@ UAV-PDD2023 자체 도메인 적응은 확실히 성공(mask mAP50 0→0.338)했
 **결과**: 나중에 실측 완료되면 `launch/bridge_drone.launch.py`를 전혀 안 건드리고 `ros2 launch launch/bridge_drone.launch.py camera_z:=0.08 camera_pitch:=0.15` 처럼 커맨드라인에서 바로 반영 가능 — 코드 모르는 팀원도 값만 알면 적용 가능해짐. 젯슨에서 두 가지 다 실측 검증: (1) 인자 없이 기본값(z=0.05)이 그대로 나오는지, (2) `camera_z:=0.12 camera_pitch:=0.15` 오버라이드가 실제로 `tf2_echo base_link camera_link`에 정확히 반영되는지(Translation z=0.120, RPY pitch=0.150rad=8.594° 정확히 일치) — 둘 다 확인.
 
 전부 GitHub에 커밋/푸시 완료.
+
+## 2026-08-12 세션 (계속) — 순수 로직 유닛 테스트 추가
+
+이 프로젝트에 지금까지 실제 로직 테스트가 하나도 없었음(각 패키지 `package.xml`에 `python3-pytest` 등이 test_depend로는 있었지만 ament 코드 스타일 검사용이었고, 실제 계산 로직을 검증하는 테스트 파일 자체가 없었음). 하드웨어 없이 원격으로 할 수 있는 작업 중 하나로 판단해서 추가.
+
+**환경 확인**: 이 Mac(Apple Silicon)엔 `cv2`/`numpy`는 있지만 `pyrealsense2`(pip 배포가 x86_64 Linux/Windows 위주라 arm64 macOS 미지원)와 `rclpy`(ROS2 미설치)는 없음 — 그래서 테스트 대상을 이 제약에 맞춰 나눠서 진행:
+- **이 Mac에서 바로 실행 가능**: 데이터셋 변환 스크립트 3개(`convert_deepcrack_to_yolo_seg.py`/`convert_dacl10k_to_yolo_seg.py`/`convert_uavpdd_to_yolo_seg.py`)의 순수 함수 — cv2/numpy/표준 라이브러리만 필요.
+- **젯슨에서만 실행 가능**: `vision_ai/measurement.py` — `pyrealsense2.rs2_deproject_pixel_to_point`에 의존.
+- **rclpy 없이는 임포트 자체가 안 됨**: `lidar_mapping/coverage_grid_node.py`는 모듈 최상단에서 `import rclpy`를 하고 있어서, 셀 계산 로직이 그 안에 인라인돼 있으면 이 Mac에서 테스트 불가능.
+
+**리팩터링**: `coverage_grid_node.py`의 순수 계산 부분(`position_to_cell()`, `build_status_payload()`)을 rclpy에 의존하지 않는 새 모듈 `lidar_mapping/coverage_math.py`로 분리 — `vision_ai/measurement.py`가 이미 쓰고 있던 것과 같은 패턴(ROS I/O는 노드 파일에, 계산은 별도 순수 모듈에). 노드 파일은 이 함수들을 import해서 쓰도록만 변경, 로직 자체는 안 바꿈.
+
+**작성한 테스트(총 36개, 전부 통과)**:
+- `scripts/test/test_convert_deepcrack.py`(6개) — 마스크→폴리곤 변환, 노이즈 필터링(`MIN_CONTOUR_AREA`), 파일 없음/빈 마스크 처리
+- `scripts/test/test_convert_dacl10k.py`(5개) — Crack 클래스만 추출, 다른 18개 클래스(Rust 등) 제외, 3점 미만 폴리곤 스킵
+- `scripts/test/test_convert_uavpdd.py`(5개) — 4개 크랙 서브타입 유지, Pothole/Repair 제외, bbox→4점 폴리곤 변환
+- `src/lidar_mapping/test/test_coverage_math.py`(7개) — 셀 인덱스 계산(양수/음수/경계값), 2026-08-08 세션에서 젯슨 실측으로 확인했던 값과 동일한 결과 재현
+- `src/vision_ai/test/test_measurement.py`(6개, 젯슨 전용) — 핀홀 공식 검증(65px→100mm), 0-depth 예외 처리, 2026-07-13 우드락 실측(1.4m, 55mm)과 같은 자릿수 합성 케이스로 회귀 확인
+
+**검증**: 이 Mac에서 23개(변환 스크립트+coverage_math), 젯슨에서 13개(measurement+coverage_math 재확인) 전부 통과. `coverage_grid_node.py` 리팩터링 후 실제 노드 동작도 합성 TF로 재확인(칸 (1,2), 면적 2.2㎡ — 2026-08-08 세션과 동일한 결과, 회귀 없음).
+
+`README.md`에 테스트 실행 방법 추가. 전부 GitHub에 커밋/푸시 완료.
