@@ -42,10 +42,12 @@ def generate_launch_description():
         # D455F 단일 캡처 지점. vision_ai/SLAM 등 카메라가 필요한 모든 노드는
         # pyrealsense2로 디바이스를 직접 열지 않고 이 노드가 발행하는 토픽을
         # 구독한다 (카메라가 하나뿐이라 두 프로세스가 동시에 열면 충돌 위험).
-        # 해상도는 기존 vision_ai의 수동 pyrealsense2 설정(depth 1280x720,
-        # color 1280x800, 둘 다 30fps)과 맞춤 — 파라미터명이
+        # depth/color 모두 1280x720x30 — 파라미터명이
         # depth_module.depth_profile / rgb_camera.color_profile 임에 주의
         # (구버전 realsense-ros의 *.profile과 다름, 4.58.2 기준 실측 확인).
+        # 2026-08-13 실측: color를 1280x800으로 두면 depth와 종횡비가
+        # 달라 align_depth 재투영 시 프레임의 ~82%가 항상 무효(depth=0)로
+        # 나옴(장면과 무관하게 고정된 패턴) — 두 해상도를 맞춰서 해결.
         Node(
             package='realsense2_camera',
             executable='realsense2_camera_node',
@@ -60,7 +62,7 @@ def generate_launch_description():
                 'enable_infra2': False,
                 'pointcloud.enable': False,
                 'depth_module.depth_profile': '1280x720x30',
-                'rgb_camera.color_profile': '1280x800x30',
+                'rgb_camera.color_profile': '1280x720x30',
             }],
         ),
         Node(

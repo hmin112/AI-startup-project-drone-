@@ -498,4 +498,33 @@ UAV-PDD2023 자체 도메인 적응은 확실히 성공(mask mAP50 0→0.338)했
 
 **검증**: 이 Mac에서 23개(변환 스크립트+coverage_math), 젯슨에서 13개(measurement+coverage_math 재확인) 전부 통과. `coverage_grid_node.py` 리팩터링 후 실제 노드 동작도 합성 TF로 재확인(칸 (1,2), 면적 2.2㎡ — 2026-08-08 세션과 동일한 결과, 회귀 없음).
 
+## 2026-08-13 세션 — 학교에서 첫 실물 핸드헬드 테스트 (비행 없음, 카메라만 손으로 이동)
+
+사용자가 학교에 도착해서 처음으로 실제 하드웨어(젯슨+D455F) 앞에서 직접 테스트 가능해짐 — 단, **드론은 띄우지 않고 카메라를 손으로 들고 이동**하는 조건. 지금까지 원격으로만 검증하던 여러 항목(라이브 SLAM, mm 측정, 3D 재구성)을 처음으로 실물로 확인.
+
+**작업 관리 실수와 교훈 — 프로세스 중복으로 메모리 거의 소진**: 파이프라인을 여러 번 재시작하면서 `pkill -f "ros2 launch|realsense2_camera_node|rgbd_odometry|rtabmap"` 패턴만 썼는데, 이게 `vision_ai_node`/`recorder_node`/`drone_core_node`/`lidar_mapping_node`/`crack_fusion_node`/`coverage_grid_node`/`web_dashboard_node`/`static_transform_publisher`는 전혀 안 잡아서 재시작할 때마다 이 노드들이 그대로 남고 새 세대가 그 위에 또 쌓임. 3~5세대가 겹쳐 쌓이면서 가용 메모리 85Mi, 스왑 70%까지 찍음(2026-07-12 OOM 인시던트와 같은 패턴). `pkill -f "bridge_drone_ws/install|ros2 launch|realsense2_camera_node|rgbd_odometry|rtabmap|static_transform_publisher"`로 패턴을 넓혀서 해결. **교훈**: 앞으로 파이프라인을 재시작할 때는 반드시 `ps aux`로 전체 프로세스 목록을 확인해서 "노드마다 정확히 1개"인지 검증한 뒤 진행할 것 — 특히 `static_transform_publisher`처럼 노드 이름과 실행 파일명이 다른 경우 놓치기 쉬움.
+
+**RTAB-Map 라이브 SLAM 검증 — 처음으로 성공**: 카메라를 실제로 든 채 좌우로 이동시켜봤지만 처음엔 `Odom: quality=0`이 계속 반복(추정 실패, `Not enough inliers 0/15` 반복). 순서대로 원인 규명:
+1. **가설(기각)**: `depth_module.depth_profile`(1280x720)과 `rgb_camera.color_profile`(1280x800)의 종횡비가 달라서 `align_depth` 재투영 시 프레임 대부분이 무효(depth=0)가 되는 줄 알았음 — 실측해보니 depth 유효 픽셀 비율이 해상도를 맞춰도(1280x720x30 동일) 16.7%→16.8%로 거의 그대로라 기각. (그래도 두 스트림을 맞추는 게 더 단순하다고 판단해 `launch/bridge_drone.launch.py`의 `rgb_camera.color_profile`은 `1280x720x30`으로 유지.)
+2. **진짜 원인**: `config/rtabmap_tuning.yaml`의 `Vis/MinInliers`를 지난 세션에 20→15로 완화해뒀는데, 실제 사무실 환경(창문 없는 실내, 어질러진 책상 등)에서는 그마저도 너무 엄격해서 매 프레임 등록 실패 — 로그에 가끔 inlier가 6~10개까지 올라가는 걸 보고 **15→8로 재조정**하자 즉시 `Odom: quality=100~540`대로 정상 트래킹 시작.
+3. **TF 체인 실시간 확인**: `tf2_echo odom base_link`/`tf2_echo map odom` 둘 다 프레임마다 Translation/Rotation이 실제 움직임에 맞춰 갱신되는 것 확인 — 지금까지 미검증이던 "실제 이동 중 TF 갱신" 항목이 드디어 해소됨.
+4. **루프클로저**: 후보는 감지되지만(`Rejecting all added loop closures... graph error ratio 4.8~9.7`), `RGBD/OptimizeMaxError`(기본 3.0 표준편차) 초과로 계속 거부됨 — 짧은 핸드헬드 이동이라 오도메트리 드리프트가 누적된 정황, 안전장치 자체는 정상 동작(잘못된 루프클로저로 맵이 깨지는 걸 막음).
+5. **새로 발견한 버그 — 오도메트리 guess 발산**: 카메라를 가만히 둔 채로 등록이 계속 실패하자, 내부 모션 예측(guess)이 매 프레임 같은 방향으로 계속 외삽되다가 `xyz=488, -21, 1037`(미터!)까지 발산 — 이후로는 실제로 다시 움직여도 guess 자체가 완전히 틀어져서 "All projected points are outside the camera"만 반복하며 영원히 복구 불가능해짐. `Odom/ResetCountdown: "1"`을 추가해서 연속 등록 실패 시 오도메트리가 스스로 리셋되도록 함(수동 재시작 없이 자가 복구).
+
+**`vision_ai` 측정 파이프라인 — 카메라 리팩터링 후 첫 실물 검증**:
+- vision_ai 자체는 정상 발행 확인(`/vision_ai/detections` ~9Hz).
+- **크랙 모델 도메인 시프트 발견**: 예전 우드락 실험(2026-07-13)에 쓰던 흰색 스티로폼 긁힘 자국을 다시 대봤는데 `crack_seg_v3`(DeepCrack+dacl10k 실제 콘크리트 균열로만 파인튜닝)가 전혀 탐지 못함 — confidence를 0.01까지 낮춰도 최고값이 0.0275(기본 임계값 0.25의 1/10)로, 임계값 문제가 아니라 모델이 이 저대비 합성 결함 패턴 자체를 학습한 적이 없어서 못 알아보는 것으로 확인. **모델이 실제 균열 도메인에 특화된 결과일 가능성**(나쁜 신호가 아닐 수 있음) — 다만 예전 검증 방법(우드락 대체물)이 지금 모델 버전엔 더 이상 안 맞는다는 뜻이라, 실물 균열 없이 정확도 재검증할 방법이 마땅치 않아짐.
+- **실제 벽 틈(폭 2cm, 깊이 1cm, 새로 1m, 거리 1.5m)으로 대체 테스트**: 탐지는 잘 됨(confidence 0.29~0.36, class="crack") — 실제 결함 형태에는 반응한다는 뜻. 하지만 `length_mm`/`width_mm`이 계속 `null`.
+- **측정 실패 원인 규명 + 버그 수정**: bbox 4개 모서리 중점 중 3개가 정확히 depth=0(무효)이었음. `src/vision_ai/vision_ai/measurement.py`에 `_nearest_valid_depth()` 추가 — 측정 지점이 무효면 반경 5px까지 링 단위로 넓혀가며 가장 가까운 유효 depth를 대신 사용(`deproject_point_m`/`measure_distance_mm` 둘 다 적용). 유닛 테스트도 갱신: 기존 "단일 무효 픽셀→예외" 테스트를 실제로는 폴백으로 복구되는 게 맞는 동작이라 판단해 "반경 내 유효 depth 전혀 없음→예외"로 교체하고, "단일 무효 픽셀→폴백으로 복구" 테스트를 새로 추가(총 7개, 전부 통과).
+- **그래도 이 벽 틈은 여전히 측정 실패**: 반경 8px(17×17 영역)까지 넓혀서 확인해봐도 한쪽 모서리 지점은 유효 depth가 단 하나도 없음 — 틈의 한쪽 면이 카메라에서 볼 때 그늘지거나 안쪽으로 깊어서 스테레오 depth 자체가 그 구역을 못 읽는 **실제 물리적 한계**로 판단(반경을 억지로 더 넓히면 결함과 무관한 배경 depth를 가져다 써서 오히려 부정확해짐). **콘크리트 표면의 얕은 선형 균열은 이렇게 깊은 틈보다 훨씬 유리한 조건일 가능성이 높음** — 실제 균열로 재검증 필요, 다음 우선순위로 기록.
+
+**실시간 3D 맵(dense reconstruction) — 새로운 목표, 부분 성공**: 사용자가 "균열보다 먼저 실시간으로 물체/구조물을 depth 포함해서 3D로 쌓는 것" 자체를 검증하고 싶다고 요청. RTAB-Map이 이미 `/cloud_map`(컬러 포인트클라우드), `/map`/`/grid_prob_map`(2D occupancy), `/octomap_full`(3D 복셀) 토픽을 광고하고 있었지만 전부 실제로는 발행되지 않고 있었음 — `map_always_update`(기본 false, 그래프가 크게 갱신될 때만 맵 토픽 발행) 때문으로 추정, 지금까지 루프클로저가 계속 거부돼서 "크게 갱신"되는 이벤트 자체가 없었던 것으로 보임. `config/rtabmap_tuning.yaml`에 `map_always_update: true` 추가해서 시도했다가 **첫 시도에서 `InvalidParameterTypeException`으로 `rtabmap` 노드가 즉시 죽는 사고**(exit code -6) — RTAB-Map의 내부 Parameters(전부 문자열, `Vis/MinInliers: "8"`처럼 따옴표 필요)와 달리 `map_always_update`는 ROS2 네이티브 bool 파라미터라 문자열 `"true"`를 주면 타입 불일치로 죽는다는 걸 실측으로 확인. YAML에서 따옴표 없이 `true`(진짜 bool)로 수정해서 해결. **결과**: `/map`, `/grid_prob_map`, `/octomap_full` 전부 ~1Hz로 실시간 발행 확인(수정 전엔 `Maps update=0.0000s`이던 게 수정 후 `0.03~0.04s`로 실제 연산이 도는 것도 로그로 확인). **단, 컬러 포인트클라우드 `/cloud_map`만은 여전히 안 나옴** — `RGBD/CreateOccupancyGrid`/`Grid/3D`/`cloud_output_voxelized` 등 관련 파라미터는 전부 정상값인데도 원인 미상, 다음 세션 이어서 조사 필요. `/octomap_full`(3D 복셀, 색 없음)까지는 확인됐지만 사용자가 원래 그렸던 "실제 다리처럼 보이는" 결과물엔 `/cloud_map`(색 있는 점구름)이 필요.
+
+**향후 방향(설계만, 아직 미구현) — 균열 탐지를 3D 재구성 이후로 미루는 2단계 구조**: 사용자 요청으로 논의만 진행. 실시간 파트는 지금처럼 프레임별 2D 탐지(조종사 즉석 피드백용)로 유지하고, 정밀 균열 측정은 비행/촬영이 끝난 뒤 오프라인으로 수행하는 2단계 구조로 가는 방향에 합의. 두 가지 구현 후보:
+- **(A) 관측 병합**: 같은 물리적 균열을 여러 각도에서 반복 관측한 것들을 map 좌표 기준으로 묶어서 유효한 depth 측정치의 중앙값을 취함 — 오늘 만든 `_nearest_valid_depth` 폴백의 확장판, 기존 코드 재사용 위주라 구현이 가벼움.
+- **(B) 3D 메쉬 직접 탐지**: `reconstruct_from_flight.sh`가 만드는 텍스처 입힌 메쉬(여러 프레임의 depth를 이미 합쳐놓은 결과물)의 텍스처 이미지에 YOLO를 돌리고, UV 매핑으로 텍스처 픽셀을 메쉬의 3D 정점에 역매핑해서 실제 표면 위 좌표로 측정 — 원래 사용자가 그렸던 "3D 다리 구조 위에 균열이 실제로 표시" 그림에 가장 가까움, 텍스처↔메쉬 매핑 코드를 새로 짜야 해서 작업량이 더 큼.
+아직 착수 전 — 지금은 `/cloud_map` 라이브 발행 문제 해결이 선행 과제.
+
+전부 GitHub에 커밋 예정(이 세션 종료 시).
+
 `README.md`에 테스트 실행 방법 추가. 전부 GitHub에 커밋/푸시 완료.

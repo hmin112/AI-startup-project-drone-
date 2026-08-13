@@ -52,16 +52,31 @@ def test_measure_distance_mm_raises_on_zero_depth():
         pass
 
 
-def test_measure_distance_mm_raises_if_only_one_point_invalid():
+def test_measure_distance_mm_raises_if_no_valid_depth_within_search_radius():
+    # point_a 주변 반경 5px를 모두 무효로 만들어야 폴백 탐색도 실패해서
+    # ValueError가 나야 정상 (2026-08-13, 균열 경계에서의 depth=0 실패를
+    # 보고 추가한 인접 픽셀 폴백 — 아래 recovers 테스트 참고).
     depth_image = np.full((800, 1280), 1000, dtype=np.uint16)
-    depth_image[400, 600] = 0  # point_a만 무효
+    depth_image[395:406, 595:606] = 0  # point_a(600,400) 주변 11x11 블록 무효화
     intr = _synthetic_intrinsics()
 
     try:
         measure_distance_mm(depth_image, 0.001, intr, (600, 400), (665, 400))
-        assert False, "expected ValueError when either point has zero depth"
+        assert False, "expected ValueError when no valid depth exists near either point"
     except ValueError:
         pass
+
+
+def test_measure_distance_mm_recovers_from_single_dead_pixel():
+    # 균열/틈 경계처럼 딱 그 픽셀만 depth=0인 경우 — 바로 실패시키지 않고
+    # 주변 유효 픽셀로 폴백해야 함 (2026-08-13 실측: 벽 틈 측정 시 bbox
+    # 모서리 중점 4개 중 3개가 정확히 이 패턴으로 depth=0이었음).
+    depth_image = np.full((800, 1280), 1000, dtype=np.uint16)
+    depth_image[400, 600] = 0  # point_a 딱 한 픽셀만 무효, 바로 옆은 유효
+    intr = _synthetic_intrinsics()
+
+    distance_mm = measure_distance_mm(depth_image, 0.001, intr, (600, 400), (665, 400))
+    assert abs(distance_mm - 100.0) < 2.0  # 인접 픽셀로 대체돼서 1px 오차 감안
 
 
 def test_deproject_point_m_center_pixel_at_principal_point():
