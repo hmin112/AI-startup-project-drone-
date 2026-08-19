@@ -16,6 +16,8 @@
   #empty { color: #6b7280; padding: 16px 0; }
   #camera { max-width: 100%; border-radius: 8px; border: 1px solid #2a2f38; margin-bottom: 20px; display: block; }
   #camera-empty { color: #6b7280; margin-bottom: 20px; }
+  #depth-coverage { max-width: 100%; border-radius: 8px; border: 1px solid #2a2f38; margin-bottom: 20px; display: block; }
+  #depth-coverage-empty { color: #6b7280; margin-bottom: 20px; }
   h2 { font-size: 1rem; color: #9ca3af; margin: 0 0 8px; }
   #drone-status { display: flex; gap: 16px; flex-wrap: wrap; background: #181d25; border: 1px solid #2a2f38;
     border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; font-size: 0.9rem; }
@@ -49,6 +51,10 @@
   <img id="camera" alt="실시간 카메라 화면">
   <div id="camera-empty">아직 수신된 프레임이 없습니다.</div>
 
+  <h2>Depth 커버리지 (빨간색 = 이 방향은 depth가 안 잡힘)</h2>
+  <img id="depth-coverage" alt="Depth 커버리지 화면">
+  <div id="depth-coverage-empty">아직 수신된 프레임이 없습니다.</div>
+
   <h2>탐지 결과</h2>
   <table>
     <thead>
@@ -78,13 +84,17 @@
   const coverageCtx = coverageCanvas.getContext('2d');
   const cameraEl = document.getElementById('camera');
   const cameraEmptyEl = document.getElementById('camera-empty');
+  const depthCoverageEl = document.getElementById('depth-coverage');
+  const depthCoverageEmptyEl = document.getElementById('depth-coverage-empty');
   const droneConnectedEl = document.getElementById('drone-connected');
   const droneArmedEl = document.getElementById('drone-armed');
   const droneModeEl = document.getElementById('drone-mode');
   const droneBatteryEl = document.getElementById('drone-battery');
   const WS_PORT = 8765;
   cameraEl.style.display = 'none';
+  depthCoverageEl.style.display = 'none';
   let lastFrameUrl = null;
+  let lastDepthCoverageUrl = null;
 
   function connect() {
     const ws = new WebSocket(`ws://${location.hostname}:${WS_PORT}`);
@@ -101,7 +111,18 @@
     ws.onerror = () => ws.close();
     ws.onmessage = (event) => {
       if (event.data instanceof Blob) {
-        renderFrame(event.data);
+        // 첫 1바이트가 프레임 종류(A=YOLO 주석 영상, D=depth 커버리지
+        // 영상) — web_dashboard_node가 같은 바이너리 채널에 두 영상을
+        // 실어보내면서 붙인 태그, 나머지가 실제 JPEG 바이트.
+        event.data.arrayBuffer().then((buf) => {
+          const typeByte = new Uint8Array(buf, 0, 1)[0];
+          const jpegBlob = new Blob([buf.slice(1)], { type: 'image/jpeg' });
+          if (typeByte === 68 /* 'D' */) {
+            renderDepthCoverageFrame(jpegBlob);
+          } else {
+            renderFrame(jpegBlob);
+          }
+        });
         return;
       }
       let parsed;
@@ -150,6 +171,18 @@
     cameraEl.src = url;
     cameraEl.style.display = 'block';
     cameraEmptyEl.style.display = 'none';
+  }
+
+  function renderDepthCoverageFrame(blob) {
+    const url = URL.createObjectURL(blob);
+    const previousUrl = lastDepthCoverageUrl;
+    lastDepthCoverageUrl = url;
+    depthCoverageEl.onload = () => {
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+    };
+    depthCoverageEl.src = url;
+    depthCoverageEl.style.display = 'block';
+    depthCoverageEmptyEl.style.display = 'none';
   }
 
   function render(detections) {

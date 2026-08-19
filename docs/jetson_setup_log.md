@@ -528,3 +528,23 @@ UAV-PDD2023 자체 도메인 적응은 확실히 성공(mask mAP50 0→0.338)했
 전부 GitHub에 커밋 예정(이 세션 종료 시).
 
 `README.md`에 테스트 실행 방법 추가. 전부 GitHub에 커밋/푸시 완료.
+
+## 2026-08-19 세션 — depth_coverage_node 신규 구현, RTAB-Map 조각화 문제 발견, mm 측정 재검증, D455F 셀프캘리브레이션 시도
+
+목표: 사용자가 학교에서 실물 하드웨어로 "실시간 3D 재구성"을 처음부터 검증하고 싶어함 — 콘크리트/균열은 일단 제쳐두고, 작은 물체(연필꽂이)로 파이프라인 자체가 도는지부터 확인하자는 방향으로 진행.
+
+**`/cloud_map` 미발행 — 재확인 결과 버그 아니었음**: 카메라가 몇 분간 정지 상태일 때 `/cloud_map`이 전혀 안 나왔는데, `(local map=1, WM=1)` 로그로 확인해보니 RTAB-Map 지도(Working Memory)에 새 노드가 전혀 안 늘고 있었음 — `/cloud_map`은 "그래프가 실제로 바뀔 때"(`Graph has changed!`)만 재생성되는 구조라 지도가 안 바뀌면 재생성될 일도 없는 게 정상 동작. 실제로 카메라를 손으로 움직이자 즉시 발행 시작(~0.4~0.5Hz), WM도 1→50까지 증가 확인.
+
+**RTAB-Map DB 조각화 발견(신규 실측 문제)**: 연필꽂이를 손으로 한 바퀴 돌려 촬영 후 `scripts/reconstruct_from_flight.sh`로 재구성했더니 `rtabmap-export`가 `poses=1, links=0`이라는 이상한 결과를 냄. `rtabmap.db`를 Python `sqlite3` 모듈로 직접 열어 `Node`/`Link` 테이블 조회 — 총 노드 749개가 **8개의 서로 다른 map_id(0~7)로 쪼개져 있었음**(369/1/20/322/9/1/6/21개). 세션 중 오도메트리가 **9번 리셋**됐는데(`Odometry is reset ... Increment map id!`), 리셋마다 좌표 원점이 새로 잡히고 이후 조각이 이전 조각과 루프클로저로 다시 안 이어짐(`Rejected loop closure ... Not enough inliers`). `poses=1`은 대부분의 조각이 그래프상 고립돼서 최적화 대상에서 빠졌기 때문으로 추정. 포인트클라우드를 다운받아 좌표 기반 voxel 연결요소 클러스터링(map_id별 PointSourceId는 `--cam_projection`이 PDAL 미설치로 못 씀, `rtabmap-export --cam_projection`이 "PDAL support 없음" 경고와 함께 카메라ID 생략)으로 111개 클러스터(최대 덩어리 9,735점=58%, 나머지는 흩어짐) 확인, 아티팩트로 조각별 색상 뷰어를 만들어 직접 눈으로도 확인. **교훈**: 카메라를 중간에 멈추거나 다시 잡으면 리셋이 나고 그때마다 지도가 갈라짐 — 다음엔 처음부터 끝까지 끊김 없이 한 번에 움직이는 게 중요. 이번엔 젯슨이 유선 연결이라 자유롭게 재시도가 어려워 다음 하드웨어 세션으로 이월.
+
+**단일 프레임 "2.5D" 캡처로 우회**: SLAM 없이 depth 프레임 한 장만으로 픽셀별 3D 역투영(`rs2_deproject_pixel_to_point`)해서 점구름을 만드는 방식 — 조각날 일이 없는 대신 카메라가 본 한 면만 나옴(뒷면은 데이터 없음, 완전한 3D엔 여러 각도 필요하다는 걸 직접 보여주는 지점). `capture_single_frame.py`(신규, pyrealsense2 단독 스크립트, ROS 파이프라인과 무관하게 동작)로 5m 범위까지 캡처(153,834점). RANSAC 평면검출(최대 평면=바닥으로 추정)+voxel 클러스터링으로 바닥/물체/배경을 분리하고 카메라 기준 거리(평균/최소/최대)까지 계산, 카테고리별 켜고 끄는 토글이 있는 뷰어로 확인 — 물체(가장 가까운 덩어리) 평균 1.21m, 바닥 평균 1.50m로 실측과 정성적으로 부합. 다만 완벽한 경계 분리는 아니고 물체가 바닥/책상면과 맞닿으면 같은 덩어리로 합쳐질 수 있음(참고용 눈대중 수준).
+
+**`depth_coverage_node` 신규 구현**: `src/vision_ai/vision_ai/depth_coverage_node.py` — color/depth 동기화해서 depth 무효(0) 픽셀을 반투명 빨간색으로 덮어 그려 `/vision_ai/depth_coverage`로 발행(YOLO 추론과 무관한 독립 노드, 장애 격리 원칙 유지). `web_dashboard`에 두 번째 카메라 뷰로 연동 — 바이너리 웹소켓 채널에 1바이트 타입 태그(`A`=YOLO 주석, `D`=depth 커버리지)를 붙여서 프론트엔드가 구분하도록 `index.html`도 수정. **실측**: 물체 테두리(실루엣 경계)에서만 얇게 빨간 무효 영역이 나오고 표면 안쪽은 깨끗함 — 스테레오 depth 카메라의 전형적인 실루엣 경계 아티팩트(좌우 IR 카메라가 경계에서 서로 다른 걸 봐서 매칭 실패)로, 8/13 벽 틈 depth 무효 문제와 같은 계열. 균열처럼 얕은 선형 결함엔 영향이 적을 것으로 예상(표면 자체는 깨끗하므로).
+
+**vision_ai mm 측정 정확도 재검증 완료 — 8/7 카메라 리팩터링 이후 최초 실물 검증**: 60cm 자를 세우고 실제 ROS 파이프라인(`realsense2_camera_node`+`vision_ai_node`)이 발행하는 color+depth 프레임을 캡처(`capture_ros_frame.py` 신규, message_filters 동기화 1회성 구독 노드)해서 자의 빨간 10cm 눈금 두 지점을 측정. 자에 인쇄된 숫자 자체는 1m/76cm 거리에서 자가 프레임 폭의 50px밖에 안 차지해서 카메라 해상도로는 전혀 안 읽혀서(1mm≈1.76px), 빨간 눈금의 색상을 프로그램적으로 검출해서 대체. 첫 시도는 "가장 빨간 픽셀"의 x좌표를 그대로 썼다가 얇은 자 몸체를 벗어나 depth=0(무효)이 나옴 — depth가 실제로 유효한 연속 구간(700~900mm대)을 찾아 그 구간의 median x/depth로 재선정해서 해결(얇은 물체는 픽셀 하나 단위로 유효/무효가 갈릴 수 있다는 교훈, `_nearest_valid_depth`와 같은 계열의 함정). **측정값 107.0mm vs 실제 100mm — 오차 +7.0mm(7.0%)**, 카메라~자 거리 약 76~78cm. 7/13 우드락 실험(1.4m에서 7.5% 오차)과 오차율이 거의 동일 — **8/7 카메라 캡처 단일화 리팩터링이 측정 정확도를 깨지 않았다는 게 최초로 실물 확인됨**.
+
+**D455F 셀프캘리브레이션(On-Chip + Tare) 시도**: 위 7% 오차를 줄여보려고 Intel 공식 예제(`~/librealsense/wrappers/python/examples/depth_auto_calibration_example.py`, 소스에 이미 포함돼 있었음)를 참고해 `pyrealsense2.auto_calibrated_device` API로 시도.
+- **On-Chip calibration(wall mode) 성공**: 공식 예제는 캘리브레이션 전체에서 emitter를 끄는데, 텍스처 없는 벽이 타겟이라 그대로 하면 "Not enough depth pixels! - low fill factor" 에러가 남 — emitter를 켜고 재시도해서 성공, health=-0.0108(거의 보정 불필요한 수준)로 온칩 보정값 갱신 및 저장(`write_calibration()`) 완료.
+- **Tare calibration 실패, 미해결**: 벽까지 정확히 1m(줄자 확인)를 ground truth로 `run_tare_calibration(1000.0, ...)` 호출 시 매번 `hwmon command 0x80(...) failed (response -7= HW not ready)`. JSON 파라미터를 공식 unit test 기본값(`unit-tests/live/calib/pytest-tare-calibrations.py`)으로 바꿔도, `hardware_reset()` API 호출 후 15초 대기해도, **USB 케이블을 물리적으로 뽑았다 다시 꽂은 뒤에도(재열거 확인됨, `lsusb`로 새 Device 번호 확인)** 동일하게 재현됨 — 코드/파라미터/일시적 상태 문제가 아니라 이 카메라(펌웨어 5.15.1.55)의 실제 제약이나 버그로 추정. **다음에 시도할 것**: 펌웨어 업데이트 확인, 또는 Intel 공식 포럼에 D455F+이 펌웨어 조합의 Tare 이슈 문의. 참고로 On-Chip 보정의 health 값이 이미 거의 0에 가까웠던 걸 보면, 애초에 7% 오차의 원인이 광학 캘리브레이션(intrinsic/extrinsic) 쪽이 아니라 depth 스케일 자체의 문제(Tare가 고치는 대상)이거나, 혹은 우리 쪽 픽셀 선정/측정 방법론의 잔차일 가능성도 있음 — 아직 원인 확정은 아님.
+
+전부 GitHub에 커밋/푸시 완료.

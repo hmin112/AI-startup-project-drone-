@@ -54,6 +54,9 @@ class WebDashboardNode(Node):
         self.create_subscription(
             Image, '/vision_ai/annotated', self._on_annotated, qos_profile_sensor_data
         )
+        self.create_subscription(
+            Image, '/vision_ai/depth_coverage', self._on_depth_coverage, qos_profile_sensor_data
+        )
 
         http_port = self.get_parameter('http_port').value
         ws_port = self.get_parameter('ws_port').value
@@ -93,13 +96,22 @@ class WebDashboardNode(Node):
         asyncio.run_coroutine_threadsafe(self._broadcast(msg.data), self._loop)
 
     def _on_annotated(self, msg):
+        self._publish_frame(msg, b'A')
+
+    def _on_depth_coverage(self, msg):
+        self._publish_frame(msg, b'D')
+
+    def _publish_frame(self, msg, type_byte):
+        # 두 영상 피드(YOLO 주석/depth 커버리지)가 같은 바이너리 웹소켓
+        # 채널을 공유하므로, 프론트엔드가 구분할 수 있게 1바이트 타입
+        # 태그를 JPEG 앞에 붙인다.
         if not self._ws_clients or self._loop is None:
             return
         frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if not ok:
             return
-        asyncio.run_coroutine_threadsafe(self._broadcast(buf.tobytes()), self._loop)
+        asyncio.run_coroutine_threadsafe(self._broadcast(type_byte + buf.tobytes()), self._loop)
 
     async def _broadcast(self, payload):
         dead = set()

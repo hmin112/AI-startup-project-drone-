@@ -181,6 +181,16 @@ def generate_launch_description():
             name='coverage_grid_node',
             output='screen',
         ),
+        # 카메라를 어느 방향으로 움직여야 depth가 잘 잡히는지 실시간으로
+        # 눈으로 확인하기 위한 시각화 — depth 무효(0) 픽셀을 빨간색으로
+        # 덮어 그려서 /vision_ai/depth_coverage로 발행 (web_dashboard의
+        # 두 번째 카메라 뷰). vision_ai_node의 YOLO 추론과는 독립된 노드.
+        Node(
+            package='vision_ai',
+            executable='depth_coverage_node',
+            name='depth_coverage_node',
+            output='screen',
+        ),
         # D455F 원본 컬러 영상을 H.264로 저장 (착륙 후 정밀 3D 재구성용
         # 원본 데이터, docs 5번/8번 항목). 개발/벤치 테스트 중에도 계속
         # 녹화되니 디스크 용량 주기적으로 확인할 것 — 필요 없으면 이
