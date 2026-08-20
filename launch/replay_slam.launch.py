@@ -2,6 +2,7 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -27,21 +28,32 @@ RTABMAP_TUNING_FILE = os.path.join(
 
 
 def generate_launch_description():
-    camera_extrinsic_args = [
+    args = [
         DeclareLaunchArgument('camera_x', default_value='0.0'),
         DeclareLaunchArgument('camera_y', default_value='0.0'),
         DeclareLaunchArgument('camera_z', default_value='0.05'),
         DeclareLaunchArgument('camera_roll', default_value='0.0'),
         DeclareLaunchArgument('camera_pitch', default_value='0.0'),
         DeclareLaunchArgument('camera_yaw', default_value='0.0'),
+        # 균열 탐지/태깅까지 같이 돌릴지. SLAM만 확인하고 싶을 땐 false로 꺼서
+        # YOLO 추론 부하를 없애면 더 빠른 재생 속도를 쓸 수 있다.
+        DeclareLaunchArgument(
+            'cracks', default_value='true',
+            description='vision_ai + crack_fusion + crack_collector 동시 실행 여부',
+        ),
+        DeclareLaunchArgument(
+            'cracks_output', default_value=os.path.expanduser('~/.ros/cracks.json'),
+            description='병합된 크랙 목록을 저장할 경로',
+        ),
     ]
+    run_cracks = IfCondition(LaunchConfiguration('cracks'))
 
     # bag 재생 시각을 따라가야 하므로 모든 노드가 sim time을 써야 한다
     # (`ros2 bag play --clock`이 /clock을 발행). 이게 없으면 노드들이 벽시계를
     # 보면서 "메시지가 너무 오래됐다"고 판단해 전부 버린다.
     sim_time = {'use_sim_time': True}
 
-    return LaunchDescription(camera_extrinsic_args + [
+    return LaunchDescription(args + [
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
@@ -98,5 +110,39 @@ def generate_launch_description():
             # 재생마다 이전 결과를 지우고 새 지도로 시작 — 같은 bag을 파라미터만
             # 바꿔 반복 재생하는 게 이 워크플로의 목적이라 항상 초기화한다.
             arguments=['-d'],
+        ),
+        # --- 아래는 균열 탐지/태깅 경로 (cracks:=false로 끌 수 있음) ---
+        # 녹화해둔 프레임에 YOLO를 돌려 균열을 찾고(vision_ai), 그 3D 위치를
+        # 위 SLAM이 만든 TF 체인으로 map 좌표까지 변환한 뒤(crack_fusion),
+        # 여러 프레임에 걸친 반복 관측을 하나로 병합해 파일로 남긴다(collector).
+        Node(
+            package='vision_ai',
+            executable='vision_ai_node',
+            name='vision_ai_node',
+            output='screen',
+            condition=run_cracks,
+            parameters=[
+                {'model_path': 'models/crack_seg_v3_combined_finetune.pt'},
+                sim_time,
+            ],
+        ),
+        Node(
+            package='lidar_mapping',
+            executable='crack_fusion_node',
+            name='crack_fusion_node',
+            output='screen',
+            condition=run_cracks,
+            parameters=[sim_time],
+        ),
+        Node(
+            package='lidar_mapping',
+            executable='crack_collector_node',
+            name='crack_collector_node',
+            output='screen',
+            condition=run_cracks,
+            parameters=[
+                {'output_path': LaunchConfiguration('cracks_output')},
+                sim_time,
+            ],
         ),
     ])

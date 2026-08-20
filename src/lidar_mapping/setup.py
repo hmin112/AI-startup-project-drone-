@@ -26,6 +26,7 @@ setup(
             'lidar_mapping_node = lidar_mapping.lidar_mapping_node:main',
             'crack_fusion_node = lidar_mapping.crack_fusion_node:main',
             'coverage_grid_node = lidar_mapping.coverage_grid_node:main',
+            'crack_collector_node = lidar_mapping.crack_collector_node:main',
         ],
     },
 )
