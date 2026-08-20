@@ -37,6 +37,28 @@ ros2 launch launch/bridge_drone.launch.py
 ros2 launch launch/bridge_drone.launch.py camera_z:=0.08 camera_pitch:=0.15
 ```
 
+## 오프라인 스캔 (촬영 → 나중에 SLAM)
+
+실시간으로 SLAM을 돌리면 젯슨의 처리 속도가 카메라 입력을 못 따라가 프레임을
+대량으로 버리고, 그 탓에 정합이 끊기면서 지도가 조각난다. 촬영 때는 원본만
+녹화하고 나중에 느린 속도로 재생하면서 처리하면 프레임을 하나도 안 버린다.
+
+```bash
+# 1) 촬영 — 카메라만 띄우고 원본 프레임을 rosbag으로 녹화
+./scripts/capture_bag.sh start 내스캔이름
+#    ... 대상을 천천히, 끊김 없이 훑는다 ...
+./scripts/capture_bag.sh stop
+
+# 2) 재생하며 SLAM (0.25배속 권장 — 낮출수록 안전)
+./scripts/replay_slam.sh ~/bags/내스캔이름 0.25
+
+# 3) 3D 재구성 (포인트클라우드 + 텍스처 메쉬 + 궤적)
+./scripts/reconstruct_from_flight.sh ~/.ros/rtabmap.db ~/.ros/내스캔이름_recon
+```
+
+같은 bag으로 파라미터만 바꿔 2번을 몇 번이고 다시 돌릴 수 있다 — 촬영을 다시
+할 필요가 없다는 게 이 워크플로의 가장 큰 장점.
+
 ## Test
 
 순수 로직(하드웨어/ROS 실행 불필요)은 `pytest`로 바로 검증 가능:
