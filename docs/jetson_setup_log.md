@@ -641,3 +641,29 @@ DB 직접 조회(`Node`/`Link` 테이블): 노드 99개 전부 `map_id 0`, 링�
 **부수 수정**: 재생 스크립트가 SIGINT로 파이프라인을 정리하는 게 정상 종료 경로인데, `rclpy.spin()`이 그때 `ExternalShutdownException`을 던져 트레이스백 + exit code 1로 끝나 로그가 지저분했음 — `crack_collector_node`의 `main()`에서 `KeyboardInterrupt`와 함께 잡도록 수정(기존 노드들도 같은 패턴이라 나중에 정리 대상).
 
 **아직 안 된 것**: 실제 균열로는 미검증. 위 검증은 전부 합성 탐지 기반이고, 벽 bag에는 균열이 없었음. **다음 단계는 진짜 균열이 있는 표면(캠퍼스 콘크리트 벽/보도블록/건물 외벽 등)을 이 워크플로로 촬영해서 탐지·측정·태깅이 실제로 나오는지 보는 것.**
+
+## 2026-08-20 세션 (계속) — 젯슨↔FC 통신 착수 (미완, 케이블 문제로 중단)
+
+사용자가 균열은 나중으로 미루고 "드론 주행용 카메라 연결 + 실제 주행 로직"을 하고 싶다고 해서 착수. 두 가지 오해/전제를 먼저 정리함.
+
+**① FPV 카메라는 젯슨과 연결돼 있지 않음(구조상 별개 경로)**: 문서 2번/3번 항목대로 이 드론엔 카메라 경로가 둘이고 서로 안 만남 —
+```
+FPV캠 → VTX(4.9/5.8GHz) → 고글/모니터     (사람이 보는 저지연 경로, 젯슨 미경유)
+D455F → 젯슨                              (AI가 처리하는 경로)
+```
+FPV 영상을 젯슨에서 보려면 USB 영상 캡처 장치가 별도로 필요함. 즉 "주행용 카메라를 연결한다"는 소프트웨어 작업 대상이 아니며, 사용자와 확인한 결과 실제 의도는 **비행 로직을 위한 젯슨↔FC 통신**이었음.
+
+**② 진짜 선행 과제는 FC 펌웨어 불일치(2026-08-07부터 미해결)**: `drone_core_node.py`를 다시 확인해보니 여전히 100% MAVROS 기반 — `mavros_msgs`의 `State`/`CommandBool`/`SetMode`, `/mavros/state`·`/mavros/local_position/pose`·`/mavros/battery` 구독, `/mavros/setpoint_position/local` 20Hz 스트림(PX4 OFFBOARD 유지용). MAVROS는 MAVLink 펌웨어(ArduPilot/PX4)를 전제하는데 확정 FC는 **Betaflight**라 MAVLink 명령/제어를 하지 않음. **비행 로직을 짜기 전에 이 갈림길을 먼저 정해야 함.**
+
+**펌웨어 선택지 정리(결정 전, 판단 근거)**:
+- **ArduPilot으로 재플래시** — MAVLink 전체 지원. 결정적으로 `VISION_POSITION_ESTIMATE`로 **외부 위치 추정치를 FC에 주입**할 수 있어서, RTAB-Map이 만드는 pose를 그대로 먹여 GPS 음영구역(교량 하부)에서 위치 유지가 가능. 이 프로젝트가 필요로 하는 구조와 가장 잘 맞고, 기존 `drone_core`도 거의 그대로 쓸 수 있음. 단 YSIDO F405 V3에 맞는 ArduPilot 타겟이 있는지 확인 필요.
+- **INAV로 재플래시** — MSP 기반, 일부 자율비행 기능. 비전 기반 위치추정 지원은 ArduPilot보다 약함.
+- **Betaflight 유지 + MSP로 제어** — Betaflight는 `MSP_SET_RAW_RC`로 스틱 입력을 주입할 수 있어 제어 자체는 가능. 다만 GPS 없는 위치 유지 기능이 없어서 **위치 제어기를 젯슨에서 통째로 직접 구현해야 함**(SLAM pose → 목표 위치 오차 → 스틱 명령). 작업량이 가장 큼.
+
+**MSP 진단 도구 작성(`scripts/msp_probe.py` 신규)**: 펌웨어를 정하기 전에 "젯슨과 FC가 애초에 말이 통하는가"부터 확인해야 해서 작성. Betaflight FC의 USB 포트는 **CDC 시리얼(`/dev/ttyACM*`)로 잡히고 MSP 프로토콜로 응답**하므로 USB 케이블 하나면 되고 **USB-UART 변환기가 필요 없음**(비행 중 텔레메트리까지 쓰려면 그때 UART 배선 필요). MSP v1 프레임(`$M<` + 길이 + 명령 + 페이로드 + XOR 체크섬)을 직접 인코딩/파싱해서 `MSP_API_VERSION`/`FC_VARIANT`(BTFL/INAV/ARDU 구분)/`FC_VERSION`/`BOARD_INFO`/`STATUS`(ARM 상태·센서 비트)/`ATTITUDE`/`ANALOG`(배터리)/`RC`(채널값)를 조회. **읽기 전용 — arming이나 모터 명령은 전혀 없음.** 젯슨에 `pyserial 3.5` 설치(`pip3 install --user pyserial`).
+
+**안전 조치**: 프로펠러 제거 후 진행(스레드락 미적용 상태라 더욱), 배터리는 연결하지 않음 — Betaflight FC는 USB 전원만으로 부팅해 MSP에 응답하므로 ESC까지 살릴 이유가 없음.
+
+**결과: FC가 젯슨에 인식되지 않음 — 미해결.** USB를 꽂았는데 `lsusb`에 새 장치가 없고(리얼센스/허브/블루투스만), **커널 로그에 USB 이벤트가 전혀 없음**(마지막 USB 로그가 부팅 13초 시점, 당시 uptime은 67초 초과). 장치 열거 시도조차 없었다는 뜻이라 전기적 연결 자체가 안 된 상태로 판단.
+**의심 순서**: (1) **충전 전용 케이블**(데이터선 없음) — 가장 흔한 원인, (2) 케이블이 덜 꽂힘, (3) FC에 전원 자체가 안 들어감.
+**다음에 확인할 것**: FC에 LED가 들어오는지(들어오면 전원은 가고 데이터선 문제로 좁혀짐), 그리고 **예전에 PC에서 Betaflight Configurator로 설정할 때 인식됐던 그 케이블**로 교체해서 재시도. 이 세션은 여기서 중단.

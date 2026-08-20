@@ -191,6 +191,8 @@ bridge_drone_ws/
 - 센서 fusion/캘리브레이션 담당자·일정 (D455F↔`base_link` extrinsic만 남음, 8번 항목 4)
 - ELRS 2.4GHz ↔ WiFi 2.4GHz 간섭 실측 일정 (8번 항목 7)
 - ~~`crack_fusion_node` 라이브 검증~~ — **2026-08-20 완료**: 실제 SLAM TF 체인이 살아있는 재생 중에 합성 탐지를 주입해 `map_position_m`이 소수점까지 기대값과 일치함을 확인. 더불어 `crack_collector_node`(신규)로 반복 관측을 map 좌표 15cm 반경 병합 + 크기 중앙값 산출까지 구현 — 8/13에 설계만 있던 "관측 병합(A안)". **단 실제 균열로는 아직 미검증**(검증에 쓴 벽 bag엔 균열이 없었음)
+- **FC 펌웨어 결정 (ArduPilot 재플래시 vs Betaflight 유지+MSP)** (신규, 비행 로직의 선행 과제) — `drone_core`는 100% MAVROS 기반이라 Betaflight로는 그대로 못 씀. ArduPilot은 `VISION_POSITION_ESTIMATE`로 SLAM pose를 FC에 먹일 수 있어 GPS 음영구역 위치 유지에 가장 잘 맞고 기존 코드도 재사용 가능. Betaflight를 유지하면 `MSP_SET_RAW_RC`로 제어는 되지만 위치 제어기를 젯슨에서 통째로 구현해야 함(8번 항목 3, `docs/jetson_setup_log.md` 2026-08-20 세션)
+- **젯슨↔FC 통신 확립** (2026-08-20 착수, 미완) — `scripts/msp_probe.py`(MSP 읽기 전용 진단) 작성 + pyserial 설치까지 했으나 FC USB가 젯슨에 열거되지 않음(커널 USB 이벤트 자체가 없어 전기적 연결 미성립으로 판단). 충전 전용 케이블 의심 — FC LED 확인 + PC에서 인식되던 케이블로 재시도
 - **실제 균열 있는 표면을 오프라인 워크플로로 스캔** (다음 우선순위) — 캠퍼스 콘크리트 벽/보도블록/건물 외벽 등. 탐지·mm측정·3D태깅이 실물에서 한 번에 이어지는지 확인하는 첫 통합 검증
 - ~~`web_dashboard` 3D 태깅 테이블 브라우저 실제 렌더링 확인~~ — 2026-08-12 완료(헤드리스 Chrome으로 실제 확인, `docs/jetson_setup_log.md` 참고). 남은 건 실제 SLAM 라이브 데이터로 자연스럽게 채워지는지뿐(이제 SLAM이 라이브로 되니 확인 가능)
 - 근접 촬영 + 드론(또는 유사) 앵글 + 세그멘테이션 마스크를 동시에 만족하는 데이터셋 탐색 — BCD/UAV-PDD2023 둘 다 시도했으나 실패(5번 항목), 여전히 미해결
