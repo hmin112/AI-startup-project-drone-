@@ -56,6 +56,18 @@ ros2 launch launch/bridge_drone.launch.py camera_z:=0.08 camera_pitch:=0.15
 ./scripts/reconstruct_from_flight.sh ~/.ros/rtabmap.db ~/.ros/내스캔이름_recon
 ```
 
+재구성 품질 관련 실측 메모(2026-08-20):
+- `--ba`(전역 번들 조정)를 붙이면 같은 표면이 여러 겹으로 어긋나 쌓이는
+  고스팅이 줄어든다 — 벽 스캔에서 봉우리 2개(26mm 간격) → 1개, 두께 σ
+  29.3mm → 20.7mm.
+- `rtabmap-export`의 기본값은 `--decimation 4 --voxel 0.01`이라 원본 depth
+  해상도를 거의 쓰지 않는다. 촘촘한 결과가 필요하면
+  `--decimation 1 --voxel 0.004`(벽 스캔 기준 49만 → 711만 점).
+- 점구름은 점마다 depth 노이즈(σ 약 20mm)만큼 흔들려서 아무리 촘촘히 해도
+  사진처럼 선명해지지 않는다. 사진 같은 외관은 `--mesh --texture` 쪽이지만,
+  **텍스처의 선명함은 형상의 정확도와 별개**임에 유의(균열 mm 측정은 후자에
+  달려 있다).
+
 같은 bag으로 파라미터만 바꿔 2번을 몇 번이고 다시 돌릴 수 있다 — 촬영을 다시
 할 필요가 없다는 게 이 워크플로의 가장 큰 장점.
 
