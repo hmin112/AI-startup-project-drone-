@@ -667,3 +667,100 @@ FPV 영상을 젯슨에서 보려면 USB 영상 캡처 장치가 별도로 필�
 **결과: FC가 젯슨에 인식되지 않음 — 미해결.** USB를 꽂았는데 `lsusb`에 새 장치가 없고(리얼센스/허브/블루투스만), **커널 로그에 USB 이벤트가 전혀 없음**(마지막 USB 로그가 부팅 13초 시점, 당시 uptime은 67초 초과). 장치 열거 시도조차 없었다는 뜻이라 전기적 연결 자체가 안 된 상태로 판단.
 **의심 순서**: (1) **충전 전용 케이블**(데이터선 없음) — 가장 흔한 원인, (2) 케이블이 덜 꽂힘, (3) FC에 전원 자체가 안 들어감.
 **다음에 확인할 것**: FC에 LED가 들어오는지(들어오면 전원은 가고 데이터선 문제로 좁혀짐), 그리고 **예전에 PC에서 Betaflight Configurator로 설정할 때 인식됐던 그 케이블**로 교체해서 재시도. 이 세션은 여기서 중단.
+
+## 2026-08-25 세션 — `/cloud_map` 미발행 원인 규명 (원격 전용, 하드웨어 접근 없음)
+
+사용자가 원격으로만 작업 가능한 상황이라, 하드웨어가 필요 없는 항목 중 최우선이던
+"`/cloud_map`(컬러 포인트클라우드) 라이브 미발행 원인 조사"(8/13부터 미해결)를 진행.
+8/20에 녹화해둔 벽 bag(`~/bags/wall_20260820_113158`)과 그때 만든
+`~/.ros/rtabmap.db`가 그대로 남아 있어서, **재촬영 없이** 전부 조사할 수 있었음 —
+촬영/처리 분리 워크플로의 이득이 또 한 번 실증된 지점.
+
+**결론부터: `/cloud_map`은 고장난 적이 없었다.** 세 가지 경로로 전부 정상 확인.
+
+| 확인 방법 | 결과 |
+|---|---|
+| 완성된 DB를 매핑 모드로 로드 + `publish_map` 서비스 호출 | **90,628점, RGB 실제 색 있음** |
+| 같은 DB, 별도 시도 | 126,172점 (obstacle 94,028 + ground 32,144) |
+| bag 재생 중 실시간 모니터링(270초) | **21회 발행, 5,191 → 90,630점 단조 증가** |
+
+RGB 샘플값도 확인: `(141,166,168)`, `(150,146,147)`, `(132,137,135)` 등 실제 벽 색이
+들어있음(0으로 채워진 더미가 아님). PointCloud2 필드는 `x, y, z, rgb`.
+
+**원인 ① rtabmap은 "발행 시점에 구독자가 붙어 있어야만" 맵 토픽을 내보낸다.**
+로그에 그대로 찍힘:
+```
+[WARN] CoreWrapper.cpp:4288::publishMapCallback() No subscribers, don't need to publish!
+```
+이번 조사 1차 시도에서 정확히 이 함정에 걸림 — `publish_map` 서비스를 먼저 호출하고
+`ros2 topic echo`를 나중에 걸었더니 아무것도 안 나왔음. 구독을 먼저 붙이고 호출하니
+즉시 12만점이 나옴. **앞으로 맵 토픽을 확인할 땐 반드시 구독을 먼저 걸 것.**
+
+**원인 ② 8/13 당시엔 발행할 내용 자체가 거의 없었다.** 그때는 루프클로저가 전부
+거부되고 오도메트리가 9번 리셋되던 상태(8/19~8/20 세션 참고)라 그래프가 자라지
+않았음. 즉 `/cloud_map` 문제는 독립된 버그가 아니라 **8/20에 고친 SLAM 조각화
+문제의 증상**이었고, 그 수정과 함께 이미 해소돼 있었음.
+
+**새로 알아낸 함정 — localization 모드에서는 `publish_map`이 빈 클라우드를 반환한다.**
+조사 중 `Mem/IncrementalMemory:="false"`(localization 모드)로 DB를 열고 서비스를
+호출했더니 "Publishing map..." + "Graph has changed! The whole cloud is regenerated."
+로그까지 찍히면서도 결과는 `points=0`이었음. 노드 기동 후 45초를 기다려도, 두 번
+호출해도 동일. 이 파라미터를 빼고 **매핑 모드(기본값)로 열자 90,628점이 정상 반환**됨 —
+localization 모드에서는 DB의 노드들이 Working Memory에 올라오지 않기 때문으로 판단.
+**완성된 스캔을 클라우드로 서빙하려면 매핑 모드로 열 것.**
+
+**부수적으로 확인한 것 — config는 정상 적용되고 있다.** 조사 중 `ros2 param get
+/rtabmap map_always_update`가 `False`로 나와 "config가 안 먹는다"고 잠깐 의심했으나,
+원인은 **직전 프로브 노드가 안 죽고 남아 `/rtabmap` 노드가 3개로 중복**된 것이었음
+(`ros2 node list`에 같은 이름 3개, `/cloud_map` publisher count 3). 깨끗한 상태에서
+재확인한 결과 `config/rtabmap_tuning.yaml`의 값이 전부 정상 적용됨:
+```
+/rtabmap:        map_always_update=True  Vis/MinInliers=8  RGBD/CreateOccupancyGrid=true  Grid/3D=true
+/rgbd_odometry:  Odom/Strategy=0(F2M)  OdomF2M/MaxSize=3000  Vis/MinInliers=8  Odom/ResetCountdown=10
+```
+**교훈**: `ros2 run`을 백그라운드로 띄우고 그 PID를 kill하면 실제 노드 프로세스는
+살아남는다(`ros2 run`은 래퍼). 원격 실험 전후로 `pkill -9 -f rtabmap`과
+`ros2 node list`로 중복을 확인할 것 — 안 그러면 엉뚱한 노드에 질의하게 된다.
+
+**참고 수치**: 이 세션의 재생에서 오도메트리 quality 260~440, 리셋 0회, 프레임 드롭 0.
+`/map`은 66회, `/cloud_map`은 21회 발행 — 클라우드 쪽은 전체 재생성 비용 때문에
+갱신 주기가 4초 내외로 더 김(로그: `MapsManager.cpp:899 Graph has changed! The whole
+cloud is regenerated.`).
+
+**Mac↔젯슨 동기화 점검**: 소스/launch/config 29개 파일 md5 비교 — 전부 동일.
+젯슨에 없는 건 `scripts/convert_*.py` 3개(데이터셋 변환 1회성 도구)뿐이라 무관.
+
+## 2026-08-25 세션 (계속) — 컬러/depth 타임스탬프 실측 (개선점 발견, 미적용)
+
+재생 로그에 아래 경고가 반복적으로 찍히는 걸 발견:
+```
+The time difference between rgb and depth frames is high (diff=0.066720s, ...)
+You may want to set approx_sync_max_interval lower than 0.02s to reject spurious
+bad synchronizations or use approx_sync=false ...
+```
+0.0667s는 15fps의 정확히 한 프레임 간격이라, 처음엔 **컬러/depth 스트림이 통째로 한
+프레임씩 어긋난 것**으로 의심했음(그렇다면 근접 촬영 중 이동할 때 mm 측정과 정합
+양쪽에 계통 오차가 생김).
+
+**실측으로 확인한 결과는 달랐음.** bag의 `camera_info` 토픽만 골라 20배속으로 재생해
+헤더 스탬프를 수집(이미지와 같은 스탬프를 갖고 메시지가 작아 유실 없이 전수 수집 가능
+— zstd 메시지 압축 때문에 `rosbag2_py`로 이미지를 직접 역직렬화하는 건 실패했고,
+젯슨에 `zstandard` 모듈도 없어서 우회한 방법):
+
+```
+수집: color=1541  depth=1526
+컬러 프레임 기준 가장 가까운 depth와의 시간차 (n=1541)
+  최소 -0.0668s / 중앙값 +0.0000s / 최대 +0.0667s
+  완전 동일 스탬프: 1526개 (99.0%)
+```
+
+즉 **99.0%는 스탬프가 완전히 일치**하고, 계통적 어긋남은 없음. 문제는 depth 짝이 아예
+없는 **고아 컬러 프레임 15개(1.0%)** 로, `approx_sync`가 이걸 66.7ms 떨어진 엉뚱한
+depth 프레임과 짝지어 주는 것. 녹화 중 depth 프레임 15개가 빠진 셈(1541 vs 1526).
+
+**개선안(아직 적용/검증 안 함)**: `rgbd_odometry`/`rtabmap`에
+`approx_sync_max_interval`을 0.02s 미만으로 주어 이런 짝을 **거부**하게 하거나,
+99%가 정확히 일치하므로 아예 `approx_sync:=false`(exact sync)로 두는 것. 어느 쪽이든
+잘못 짝지어진 15프레임이 정합에 들어가지 않게 됨. 같은 bag으로 A/B가 가능하므로
+(재촬영 불필요) **고스팅 σ 20.7mm가 줄어드는지, 루프클로저 70개가 유지되는지**를
+기준으로 검증할 것. 균열 mm 측정 정확도가 형상 정확도에 달려 있으므로 우선순위 있음.
