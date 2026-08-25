@@ -50,6 +50,9 @@ ros2 launch launch/bridge_drone.launch.py camera_z:=0.08 camera_pitch:=0.15
 ./scripts/capture_bag.sh stop
 
 # 2) 재생하며 SLAM (0.25배속 권장 — 낮출수록 안전)
+#    주의: 재생은 매번 -d 옵션으로 ~/.ros/rtabmap.db를 지우고 새로 만든다.
+#    이전 스캔 결과를 보존하려면 재생 전에 반드시 백업할 것:
+#      cp ~/.ros/rtabmap.db ~/.ros/rtabmap_<이름>.db
 ./scripts/replay_slam.sh ~/bags/내스캔이름 0.25
 
 # 3) 3D 재구성 (포인트클라우드 + 텍스처 메쉬 + 궤적)
