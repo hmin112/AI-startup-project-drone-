@@ -861,3 +861,61 @@ rsync -a homin@100.79.110.90:~/frames/wall ~/frames/
 **주의**: 대조군(RTAB-Map 포즈 + 같은 융합 코드)을 반드시 함께 돌릴 것 — 실험군만
 보면 이 스크립트의 융합 방식 차이인지 포즈 개선분인지 구분이 안 된다. 그리고 재생
 전에 `~/.ros/rtabmap.db` 백업은 필수(README 참고).
+
+## 2026-09-09 세션 (계속) — 젯슨 초기화 사고, 손실 범위 확정과 재구축 자동화
+
+젯슨이 맛가서 초기화됨. 2026-07-09부터 쌓아온 환경이 통째로 사라졌다.
+
+**살아남은 것 (전부 GitHub 저장소에 있음 — 확인 완료)**
+
+| | 상태 |
+|---|---|
+| 학습 모델 `crack_seg_v1/v2/v3` | ✅ **Git LFS에 전부 보존** (`git lfs ls-files`로 확인) |
+| 카메라 캘리브레이션(공장 intrinsic, `pixel_to_mm.py`, `get_intrinsics.py`) | ✅ 보존 |
+| ROS 패키지 4개 전체 소스 | ✅ 보존 |
+| `launch/`, `config/rtabmap_tuning.yaml`, `scripts/` 11개 | ✅ 보존 |
+| `models/training_records/` | ✅ 보존 |
+| 문서 3종(이 로그 포함) | ✅ 보존 |
+
+**날아간 것 (젯슨에만 있던 것)**
+
+| | 재취득 |
+|---|---|
+| `~/bags/wall_20260820_113158` (1.7GB, 8/20 벽 스캔) | ❌ **불가 — 재촬영 필요** |
+| `~/.ros/rtabmap.db` + `rtabmap_vis_only.db` (노드 99/루프클로저 70) | ❌ 불가 |
+| 소프트웨어 환경 전체(ROS 2, librealsense 소스빌드, torch, ultralytics) | ⭕ 재설치 (아래 스크립트) |
+| `watchdog.sh` (젯슨에만 있던 원본) | ⭕ **재작성해서 이번엔 저장소에 넣음** |
+| 학습 데이터셋(DeepCrack, dacl10k) | ⭕ 재다운로드 |
+
+**교훈 — 젯슨에만 있는 데이터는 언제든 사라진다.** 지금까지 bag과 지도 DB를 젯슨에만
+뒀는데, 이게 그대로 손실로 이어졌다. **앞으로 촬영이 끝나면 bag과 `.db`를 그 세션 안에
+Mac으로 복사할 것**(용량이 커서 저장소에 넣긴 어려우니 최소한 Mac 로컬로). 8/20에
+`rtabmap_vis_only.db` 백업을 젯슨 *안에* 만들어둔 게 그때는 통했지만(8/25에 실제로
+그걸로 복원함), 디스크가 통째로 날아가는 이번 같은 경우엔 아무 소용이 없었다.
+
+**재구축 자동화 — `scripts/jetson_setup.sh` 신규**
+
+이 로그의 2026-07-09 설치 과정과 그때 겪은 함정을 전부 스크립트로 굳혔다. 단계별로
+나뉘어 있고(`--list`로 확인) 여러 번 실행해도 안전하다. 미리 반영해둔 함정들:
+- **캠퍼스망 필터** — `ports.ubuntu.com`을 https로 자동 전환, `packages.ros.org`는
+  인증서가 안 맞으므로 apt를 5회 재시도로 감쌈
+- **librealsense udev 스크립트가 멈추는 문제** — 카메라가 꽂힌 채면 내부에서 `read -p`로
+  대기하므로 stdin에 개행을 흘려줌
+- **librealsense 빌드 실패 2건** — `libglu1-mesa-dev` 선설치 + GUI 예제 전체 비활성화
+- **PyTorch** — 처음부터 `https://pypi.jetson-ai-lab.io/jp6/cu126`(도메인 `.io`, `.dev`는
+  DNS도 안 뜸)에서 torch/torchvision을 **짝으로** 설치. NVIDIA 공식 휠은 짝 맞는
+  torchvision이 없어 결국 못 쓰므로 아예 시도하지 않음
+- **ultralytics** — `--no-deps`로 설치해야 CPU용 generic torch가 위 설치를 안 깨뜨림.
+  대신 빠지는 런타임 의존성을 따로 채움
+- 마지막에 `verify` 단계가 ros2/colcon/rtabmap-export/pyrealsense2/torch(CUDA)/
+  ultralytics/D455F 인식을 한 번에 점검
+
+수동으로 남는 건 **tailscale 재인증**(`sudo tailscale up`, 브라우저 인증 필요)과
+워크스페이스를 Mac에서 rsync로 올리는 것. 젯슨에 GitHub 인증을 두지 않는 게 이
+프로젝트 방침이라 clone 대신 rsync를 쓴다.
+
+**A안에 미치는 영향**: 검증에 쓰려던 8/20 벽 bag이 사라져 재촬영이 필요해졌다. 다만
+파이프라인 자체는 합성 데이터로 전 구간 검증이 끝나 있으므로 코드 작업은 손실이 없고,
+**어차피 촬영 방식을 바꾸는 게 맞다는 결론이 이미 나와 있었다** — 8번 항목 11의
+"주기적 풀해상도 스틸(1280×800, 약 1/10 데이터량, 1.55mm/px)"로 다시 찍으면 잃어버린
+bag(848×480×15)보다 오히려 나은 데이터가 된다. 재촬영은 손해만은 아님.
