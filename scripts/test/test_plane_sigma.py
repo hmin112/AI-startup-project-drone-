@@ -145,3 +145,27 @@ def test_measurement_band_must_not_truncate_sigma():
     assert analyse(pts)['sigma_mm'] == pytest.approx(30.0, abs=3.0)
     # 구간을 좁히면 실제로 작게 나오는 것도 함께 확인(원인이 이것임을 고정)
     assert analyse(pts, band_m=0.02)['sigma_mm'] < 20.0
+
+
+def test_ransac_tilt_must_not_absorb_ghosting():
+    """평면이 기울어져 어긋난 두 겹을 삼켜버리면 안 된다(실제로 밟았던 함정).
+
+    RANSAC은 인라이어 개수를 최대화하므로, 판정 거리가 고스팅 간격과 비슷하면
+    평면을 살짝 기울여 두 겹을 한꺼번에 인라이어로 잡는 쪽이 이긴다. 그러면
+    두 봉우리가 연속 분포로 뭉개져 고스팅이 측정에서 사라진다 — 재구성 방식을
+    비교하는 지표가 정작 비교하려던 현상을 못 보게 되는 최악의 실패.
+    refine_plane()이 방향을 다시 맞춰 이걸 막는다.
+    """
+    # 26mm 어긋난 두 겹, 각 겹은 얇고 x/y로 넓게 퍼져 있다
+    a = _plane_points(n=11000, sigma_m=0.001, offset_m=-0.013, seed=20)
+    b = _plane_points(n=11000, sigma_m=0.001, offset_m=+0.013, seed=21)
+    pts = np.vstack([a, b])
+
+    # RANSAC만 쓰면 기울어진 평면이 양쪽을 다 삼킨다
+    normal_r, _, inliers = fit_plane_ransac(pts, threshold_m=0.02, seed=0)
+    assert inliers.sum() > 15000, '이 시나리오는 RANSAC이 두 겹을 삼키는 상황이어야 함'
+
+    # 전체 파이프라인은 두 겹을 그대로 봐야 한다
+    r = analyse(pts)
+    assert r['peaks'] == 2
+    assert r['peak_spread_mm'] == pytest.approx(26.0, abs=4.0)

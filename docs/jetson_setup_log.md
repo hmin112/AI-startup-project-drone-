@@ -802,3 +802,62 @@ CPU만으로 되고, 무엇보다 **8/20 벽 bag으로 새 촬영 없이 검증 
 
 **진행 상황**: 문서 갱신 완료, 프레임 추출부터 착수. 이 항목은 결과가 나오는 대로
 이어서 기록함.
+
+**A안 파이프라인 구현 완료(2026-09-09) — 실데이터 검증은 젯슨 대기 중**
+
+젯슨이 오프라인(tailscale 기준 8/25 이후 미접속, 사용자가 전원을 켜고 재부팅까지
+했으나 여전히 연결 안 됨)이라 bag에 접근할 수 없어서, **파이프라인을 먼저 만들고
+합성 데이터로 전 구간을 검증**해두는 순서로 진행함. 젯슨이 붙으면 실행만 하면 됨.
+
+새 스크립트 4개:
+- `scripts/extract_frames.py` — bag에서 컬러/depth 쌍 추출. **ExactTime 동기화**를
+  써서, 8/25에 찾아낸 "depth 짝이 없는 고아 컬러 프레임 15장(1.0%)이 66.7ms 떨어진
+  엉뚱한 depth와 짝지어지는" 문제를 처음부터 배제함(그때 개선안으로만 적어뒀던 것).
+- `scripts/sfm_poses.sh` — COLMAP sparse SfM으로 포즈만 계산. **dense(patch-match)를
+  안 돌리므로 CUDA 불필요** → Mac에서 CPU로 가능. Mac에 colmap 4.1.1 설치 완료.
+- `scripts/fuse_depth.py` — 포즈 + depth → 포인트클라우드. **TSDF를 일부러 안 씀** —
+  8/20 기준선(rtabmap-export 포인트클라우드)과 산출물 형태를 맞춰야 직접 비교가 되고,
+  TSDF의 평균화 효과가 섞이면 포즈 개선분만 따로 볼 수 없기 때문.
+- `scripts/plane_sigma.py` — 평면 두께로 정합 품질을 재는 지표(8/20에 쓴 일회성
+  측정을 스크립트로 고정).
+
+**합성 데이터 전 구간 검증 완료**(유닛 테스트 37개 통과 + CLI 엔드투엔드):
+- 스케일 복원: SfM 좌표가 실제의 1/4 배율인 합성 장면에서 **4.000000을 정확히 복원**.
+- 두 뷰 융합: 주입한 노이즈 σ 5mm가 결과에서 **σ 5.0mm로 그대로 측정**, 봉우리 1개.
+- **포즈 오차 → 고스팅 검출**: 포즈에 26mm 오차를 일부러 주입하면 봉우리 2개·간격
+  26mm로 검출됨. 즉 측정 장치가 A안의 가설(포즈 오차가 고스팅의 주범)을 실제로
+  검증할 능력이 있음을 확인.
+
+**구현 중 밟은 함정 3개(전부 회귀 테스트로 고정)**:
+1. **RANSAC이 고스팅을 삼킨다** — 인라이어 판정 거리(20mm)가 고스팅 간격(26mm)과
+   비슷하면, 평면을 0.85° 기울여 어긋난 두 겹을 한꺼번에 인라이어로 잡는 쪽이
+   개수 최대화에서 이긴다(11,360 → 17,680점). 그 결과 두 봉우리가 연속 분포로
+   뭉개져 **정작 재려던 고스팅이 측정에서 사라졌다**. RANSAC은 "어느 점이 주
+   표면인가"를 고르는 데만 쓰고, 평면 방향은 측정 구간 전체의 총최소제곱으로 다시
+   맞추도록 `refine_plane()` 추가.
+2. **인라이어 임계값으로 두께를 재면 σ가 작게 나온다** — 분포 꼬리가 잘려서 노이즈
+   σ 15mm가 10mm로 측정됨. A/B 비교에서 노이즈가 큰 쪽이 오히려 좋아 보이는 역전이
+   생길 수 있으므로, 평면을 찾는 거리(기본 20mm)와 두께를 재는 구간(기본 ±100mm)을
+   분리함.
+3. **히스토그램 양 끝의 봉우리를 놓친다** — 경계 bin을 극대점 후보에서 빼놓으면,
+   두 겹이 완전히 갈라져 분포 양 끝에 몰린 **가장 심한 고스팅**을 정작 못 본다.
+   양 끝에 0을 덧대고 검출하도록 수정.
+
+**젯슨이 붙으면 실행할 순서**:
+```bash
+# 젯슨에서
+python3 scripts/extract_frames.py --out ~/frames/wall &
+ros2 bag play ~/bags/wall_20260820_113158 --rate 2
+# Mac으로 가져와서
+rsync -a homin@100.79.110.90:~/frames/wall ~/frames/
+./scripts/sfm_poses.sh ~/frames/wall
+./scripts/fuse_depth.py --poses ~/frames/wall/colmap/sparse/0/images.txt \
+    --pose-format colmap --depth-dir ~/frames/wall/depth \
+    --intrinsics ~/frames/wall/intrinsics.json \
+    --scale-from-sparse ~/frames/wall/colmap/sparse/0/points3D.txt \
+    --out ~/frames/wall/colmap_cloud.ply
+./scripts/plane_sigma.py ~/frames/wall/colmap_cloud.ply    # vs 8/20 기준선 σ 20.7mm
+```
+**주의**: 대조군(RTAB-Map 포즈 + 같은 융합 코드)을 반드시 함께 돌릴 것 — 실험군만
+보면 이 스크립트의 융합 방식 차이인지 포즈 개선분인지 구분이 안 된다. 그리고 재생
+전에 `~/.ros/rtabmap.db` 백업은 필수(README 참고).

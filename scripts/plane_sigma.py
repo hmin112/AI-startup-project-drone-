@@ -63,6 +63,35 @@ def fit_plane_ransac(points, threshold_m=0.02, iterations=1000, seed=0):
     return normal, d, best_inliers
 
 
+def refine_plane(points, normal, d, band_m=0.10, iterations=3):
+    """측정 구간 안의 점 전체로 평면 방향을 다시 맞춘다(총최소제곱).
+
+    왜 필요한가(개발 중 실제로 밟은 함정): RANSAC은 인라이어 **개수**를 최대화하므로,
+    판정 거리가 고스팅 간격과 비슷하면 평면을 살짝 기울여서 어긋난 두 겹을 한꺼번에
+    인라이어로 삼켜버린다. 합성 실험에서 26mm 간격의 두 겹(각 11,360점)을 20mm
+    임계값으로 맞추자 0.85° 기울어진 평면이 17,680점을 인라이어로 잡았고, 그 결과
+    두 봉우리가 연속 분포로 뭉개져 **고스팅이 측정에서 사라졌다**.
+
+    그래서 RANSAC은 "어느 점들이 주 표면인가"를 고르는 데만 쓰고, 평면의 방향은
+    구간 안의 점 전체에 대한 총최소제곱으로 다시 정한다. 겹이 나란히 어긋난
+    경우(평행 이동 오차) 전체의 최적 방향은 겹들의 평균 방향이 되므로, 두 겹이
+    분포의 양쪽 봉우리로 제대로 남는다.
+    """
+    points = np.asarray(points, dtype=np.float64)
+    for _ in range(iterations):
+        dist = points @ normal + d
+        sel = points[np.abs(dist) < band_m]
+        if sel.shape[0] < 3:
+            break
+        centroid = sel.mean(axis=0)
+        _, _, vh = np.linalg.svd(sel - centroid, full_matrices=False)
+        new_normal = vh[-1] / np.linalg.norm(vh[-1])
+        if new_normal @ normal < 0:   # 방향 뒤집힘 방지
+            new_normal = -new_normal
+        normal, d = new_normal, -float(new_normal @ centroid)
+    return normal, d
+
+
 def signed_distances(points, normal, d):
     """각 점의 평면까지의 부호 있는 거리(m)."""
     return np.asarray(points, dtype=np.float64) @ np.asarray(normal, dtype=np.float64) + d
@@ -100,9 +129,13 @@ def count_peaks(dists_m, bin_width_m=None, valley_ratio=0.85, min_height_ratio=0
     k = max(3, (len(hist) // 12) * 2 + 1)
     hist = np.convolve(hist.astype(np.float64), np.ones(k) / k, mode='same')
 
-    peak_idx = [i for i in range(1, len(hist) - 1)
-                if hist[i] >= hist[i - 1] and hist[i] > hist[i + 1]
-                and hist[i] >= hist.max() * min_height_ratio]
+    # 양 끝에 0을 덧대고 극대점을 찾는다 — 이렇게 안 하면 분포의 **맨 끝에 있는
+    # 봉우리**가 후보에서 빠진다(두 겹이 완전히 갈라져 히스토그램 양 끝에 몰리는
+    # 경우가 정확히 그 상황이라, 정작 가장 심한 고스팅을 놓치게 된다).
+    padded = np.concatenate(([0.0], hist, [0.0]))
+    peak_idx = [i - 1 for i in range(1, len(padded) - 1)
+                if padded[i] >= padded[i - 1] and padded[i] > padded[i + 1]
+                and padded[i] >= hist.max() * min_height_ratio]
     if not peak_idx:
         return 1, np.array([float(centers[int(np.argmax(hist))])])
 
@@ -132,6 +165,8 @@ def analyse(points, threshold_m=0.02, band_m=0.10, seed=0):
     """
     points = np.asarray(points, dtype=np.float64)
     normal, d, _ = fit_plane_ransac(points, threshold_m=threshold_m, seed=seed)
+    # RANSAC 평면은 기울어서 고스팅을 삼킬 수 있으므로 방향을 다시 맞춘다
+    normal, d = refine_plane(points, normal, d, band_m=band_m)
 
     all_dist = signed_distances(points, normal, d)
     in_band = np.abs(all_dist) < band_m
