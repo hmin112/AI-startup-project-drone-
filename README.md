@@ -74,6 +74,48 @@ ros2 launch launch/bridge_drone.launch.py camera_z:=0.08 camera_pitch:=0.15
 같은 bag으로 파라미터만 바꿔 2번을 몇 번이고 다시 돌릴 수 있다 — 촬영을 다시
 할 필요가 없다는 게 이 워크플로의 가장 큰 장점.
 
+## 사진 기반 3D 재구성 (A안)
+
+카메라 이동을 베이스라인으로 삼아 depth 카메라 단독보다 정확한 포즈를 얻고, 거기에
+실제 크기(스케일)를 depth로 채워 넣는 경로. 배경은 `docs/bridge_drone_project_summary.md`
+8번 항목 11 참고.
+
+```bash
+# 1) 촬영 — 기본 프로필이 1280x720x5 (해상도 우선, 데이터는 오히려 절반)
+./scripts/capture_bag.sh start 내스캔이름
+#    대상에서 90cm 떨어져, 몸을 좌우로 1m 움직이며 카메라는 대상을 계속 향하게.
+#    10cm/s로 천천히, 높이를 20cm씩 바꿔 왕복, 마지막에 시작 지점으로 복귀. 60~90초.
+#    ※ 한자리에서 카메라만 돌리면(패닝) baseline이 0이라 SfM이 실패한다.
+./scripts/capture_bag.sh stop
+
+# 2) 프레임 추출 (젯슨) — 다른 터미널에서 bag을 재생하며
+python3 scripts/extract_frames.py --out ~/frames/내스캔 &
+ros2 bag play ~/bags/내스캔이름 --rate 2
+
+# 3) SfM으로 카메라 포즈 (Mac 등 colmap이 있는 곳, CUDA 불필요)
+rsync -a homin@<젯슨IP>:~/frames/내스캔 ~/frames/
+./scripts/sfm_poses.sh ~/frames/내스캔
+
+# 4) depth 융합 — SfM의 미지 스케일을 depth로 확정하고 색을 입힘
+./scripts/fuse_depth.py --poses ~/frames/내스캔/colmap/sparse/0/images.txt \
+    --pose-format colmap --depth-dir ~/frames/내스캔/depth \
+    --color-dir ~/frames/내스캔/images --intrinsics ~/frames/내스캔/intrinsics.json \
+    --scale-from-sparse ~/frames/내스캔/colmap/sparse/0/points3D.txt \
+    --out ~/frames/내스캔/cloud.ply
+
+# 5) 브라우저에서 보고 거리 재기 (단일 HTML, 점 데이터 내장)
+./scripts/make_viewer.py --cloud ~/frames/내스캔/cloud.ply \
+    --poses ~/frames/내스캔/colmap/sparse/0/images.txt --scale <4단계가 출력한 스케일> \
+    --title "내스캔" --out viewer.html
+
+# 정합 품질 수치로 확인 (평면 두께)
+./scripts/plane_sigma.py ~/frames/내스캔/cloud.ply
+```
+
+측정 정밀도: 점구름 노이즈가 σ≈21mm라 두 점 측정은 **±30mm** 수준이다.
+10cm 미만은 신뢰하기 어렵고 1m 이상에서 가장 정확하다. **mm 단위 균열 측정은
+이 3D가 아니라 2D+depth 경로**(`vision_ai`, 실측 오차 7%)에서 해야 한다.
+
 ## Test
 
 순수 로직(하드웨어/ROS 실행 불필요)은 `pytest`로 바로 검증 가능:
