@@ -965,3 +965,77 @@ bag(848×480×15)보다 오히려 나은 데이터가 된다. 재촬영은 손�
    항목이자 안전상 가장 중요한 이유
 
 SD 부팅을 유지하는 한 3번 위험은 계속 안고 간다.
+
+## 2026-09-09 세션 (계속) — 젯슨 환경 재구축 완료, 셋업 스크립트 버그 7개 수정
+
+초기화된 젯슨에 환경을 처음부터 다시 올렸다. 새 IP는 `100.127.211.112`
+(tailscale 노드명 `homin-desktop-1` — 기존 `homin-desktop` 노드가 아직 남아 있어서
+이름이 갈렸다. 계정/호스트명은 `homin`/`homin-desktop`으로 이전과 동일).
+
+**환경이 이전과 정확히 일치해서 기록된 절차가 그대로 유효했다**: L4T R36.4.3
+(JetPack 6.2), Ubuntu 22.04.5, CUDA 12.6, 메모리 7.4Gi. 덕분에 PyTorch 설치 경로
+(`jp6/cu126`)도 그대로 썼다. 디스크는 116G(파티션 자동 확장됨), D455F는 USB 3.0에
+이미 인식된 상태였다.
+
+**최종 상태 — 전부 정상**:
+```
+ros2 OK / colcon OK / rtabmap-export OK / pyrealsense2 OK
+torch 2.8.0 (CUDA True, Orin) / torchvision 0.23.0 / ultralytics OK
+D455F 인식 OK (FW 5.15.1.55, 이전과 동일)
+colcon build: 4개 패키지 성공
+realsense2_camera 노드: 컬러 28.2Hz 발행 + aligned depth 토픽 정상
+테스트: 순수 로직 44개 + pyrealsense2 7개 = 51개 전부 통과
+```
+
+### `scripts/jetson_setup.sh`에서 잡은 버그 7개
+
+첫 실전 투입이라 전부 여기서 걸러졌다. 다음 재구축 때 같은 데서 막히지 않도록 원인과
+증상을 남긴다.
+
+1. **`echo "$PASS" | sudo -S`가 stdin을 덮어씀** — 파이프로 입력을 받는 명령이 전부
+   깨진다. `echo "deb ..." | sudo tee /etc/apt/sources.list.d/ros2.list`에서 tee가
+   받아야 할 내용 대신 비밀번호가 stdin을 차지해 **빈 파일**이 만들어졌고, ROS
+   저장소가 등록되지 않아 `Unable to locate package ros-humble-ros-base`가 났다.
+   librealsense udev 트릭(`printf '\n\n' | sudo ...`)도 같은 이유로 깨진다.
+   → stdin을 건드리지 않는 `SUDO_ASKPASS`(`sudo -A`)로 교체.
+
+2. **`apt-get update`를 재시도하지 않음** — 캠퍼스망 필터가 가로채는 지점이
+   `install`이 아니라 `update`인데, 목록이 없으면 install을 몇 번 재시도해도
+   "Unable to locate package"만 반복된다. → `apt_update_retry` 추가.
+
+3. **`set -o pipefail` + `grep -q` 조합(가장 고약했음)** — `grep -q`는 첫 매치에서
+   즉시 종료하며 앞 명령에 SIGPIPE를 보내고, `pipefail`이 그걸 **파이프라인 실패로
+   판정**한다. 그래서 ROS 목록을 1회차에 정상적으로 받아놓고도(6.8MB Packages 파일이
+   실제로 존재했다) 검사가 8번 내내 false로 나와 헛돌았다.
+   → 파이프를 쓰지 않고 변수에 담아 `case`로 검사. verify 단계의 D455F 검사도 동일 수정.
+
+4. **`v4l-utils` 누락** — RealSense 공식 `setup_udev_rules.sh`가 내부에서 `v4l2-ctl`을
+   호출하는데, 없으면 "v4l2-ctl not found"로 **조용히 중단**되고 규칙이 설치되지 않는다.
+   RSUSB 백엔드로 빌드하므로 이 규칙이 없으면 비root로 카메라를 못 연다.
+   → 의존성에 추가 + 공식 스크립트가 실패하면 규칙 파일을 직접 복사하는 폴백 추가.
+
+5. **numpy 2.x가 torch를 깨뜨림** — Jetson AI Lab의 torch 2.8.0은 NumPy 1.x로
+   컴파일돼 있어서, 버전을 안 박고 설치하면 pip가 numpy 2.2.6을 끌어오고 GPU 텐서를
+   numpy로 변환하는 순간 `RuntimeError: Numpy is not available`로 죽는다.
+   `vision_ai_node`가 YOLO 결과를 매 프레임 numpy로 바꾸므로 바로 치명적이다.
+   opencv-python도 4.11 이상은 numpy>=2를 요구해 numpy를 다시 끌어올린다.
+   → `numpy==1.26.4` + `opencv-python==4.10.0.84`로 **둘 다 고정**해야 조합이 유지된다.
+   (처음엔 경고만 보고 넘어갈 뻔했는데, 실제로 변환을 시켜보니 예외가 터졌다.)
+
+6. **`set -u`와 ROS `setup.bash` 충돌** — ROS의 setup.bash가 초기화되지 않은 변수
+   (`AMENT_TRACE_SETUP_FILES` 등)를 참조해서 `set -u` 아래에서 즉시 죽는다.
+   그 탓에 **colcon build가 아예 실행되지 않았다**. → 소싱하는 동안만 `set +u`.
+
+7. **librealsense 두 벌 충돌(ROS 환경에서만 드러남)** — 소스 빌드(2.58.4, `/usr/local/lib`)와
+   apt의 `ros-humble-librealsense2`(2.58.3, `/opt/ros/humble/lib`)가 공존하는데, ROS를
+   소싱하면 `LD_LIBRARY_PATH`에 ROS 경로가 앞서서 **구버전이 먼저 로드**되고
+   `pyrealsense2` import가 `undefined symbol: rs2_get_frame_gpu_data_or_upload`로
+   실패한다. **ROS 환경 밖에서는 멀쩡히 import되기 때문에** 그냥 확인하면 놓친다
+   (실제로 처음엔 "verify 표시가 틀렸나" 하고 넘어갈 뻔했다).
+   → `/usr/local/lib`을 `LD_LIBRARY_PATH` 앞에 두어 새 쪽(2.58.4)으로 통일.
+   soname이 같은 `2.58`이라 안전하며, ROS 카메라 노드가 2.58.4로 **28.2Hz 정상 발행**하는
+   것까지 실측 확인했다. verify 단계도 ROS를 소싱한 상태로 검사하도록 고쳤다.
+
+**교훈**: 검증은 **실제로 쓰이는 환경 조건에서** 해야 한다. 5번과 7번은 둘 다
+"import는 되는데 실제로 쓰면 깨지는" 형태였고, 단순히 `import X` 성공 여부만 봤다면
+둘 다 통과로 잘못 판정했을 것이다.
