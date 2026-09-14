@@ -67,11 +67,26 @@ def to_view_frame(p):
     return p @ R.T
 
 
-def voxel_downsample(xyz, rgb, voxel_m):
+def voxel_average(xyz, rgb, voxel_m):
+    """격자마다 점을 하나 고르는 대신 **평균**을 낸다.
+
+    위치 노이즈가 줄어들 것을 기대할 수도 있지만 실제로는 거의 안 줄어든다 —
+    2026-09-14 실측에서 셀당 187점을 평균내도 평면 잔차가 17.2mm → 16.6mm에
+    그쳤다. 프레임 간 정합 오차가 상관돼 있어서 평균으로 상쇄되지 않기 때문이다
+    (독립 노이즈였다면 1.3mm까지 떨어졌어야 한다). 그래도 평균을 쓰는 이유는
+    **색이 눈에 띄게 깨끗해지고**, 임의의 한 점을 고르는 것보다 표면이 매끄럽게
+    보이기 때문이다.
+    """
     k = np.floor(xyz / voxel_m).astype(np.int64)
-    k = (k[:, 0] * 73856093) ^ (k[:, 1] * 19349663) ^ (k[:, 2] * 83492791)
-    _, idx = np.unique(k, return_index=True)
-    return xyz[idx], rgb[idx]
+    key = (k[:, 0] * 73856093) ^ (k[:, 1] * 19349663) ^ (k[:, 2] * 83492791)
+    order = np.argsort(key)
+    ks = key[order]
+    bounds = np.r_[0, np.flatnonzero(np.diff(ks)) + 1, len(ks)]
+    cnt = np.diff(bounds).astype(np.float64)[:, None]
+    pos = np.add.reduceat(xyz[order], bounds[:-1], axis=0) / cnt
+    col = np.add.reduceat(rgb[order].astype(np.float64), bounds[:-1], axis=0) / cnt
+    return pos.astype(np.float32), np.clip(col, 0, 255).astype(np.uint8)
+
 
 
 def main():
@@ -86,24 +101,44 @@ def main():
     ap.add_argument('--title', default='포인트클라우드 스캔')
     ap.add_argument('--stats', help='패널에 넣을 스캔별 수치 JSON '
                                     '([{"title":"촬영","rows":[["해상도","1280x720",""]]}])')
+    ap.add_argument('--crop-radius-m', type=float,
+                    help='이 반경 안만 남긴다. 대상만 남기면 그만큼 촘촘하게 만들 수 있다. '
+                         '중심은 기본적으로 카메라 궤적의 무게중심 — 대상을 빙 돌며 찍었을 때 '
+                         '맞는 가정이다. 한 면만 찍었다면 카메라가 한쪽에 몰려 있어 중심이 '
+                         '대상과 어긋나므로 --crop-center 로 직접 지정할 것')
+    ap.add_argument('--crop-center', help='자를 중심 좌표 "x,y,z" (원본 클라우드 좌표계)')
     ap.add_argument('--trim-pct', type=float, default=97.0,
                     help='중심에서 먼 점 상위 몇 %%를 버릴지(먼 점은 오차가 커서 화면만 어지럽힘)')
     args = ap.parse_args()
 
     xyz, rgb, n_orig = load_ply_xyzrgb(args.cloud)
     xyz = to_view_frame(xyz)
-    xyz, rgb = voxel_downsample(xyz, rgb, args.voxel_mm / 1000.0)
+    traj_raw = None
+    if args.poses:
+        poses_tmp = read_colmap_images(args.poses)
+        traj_raw = to_view_frame(np.array(
+            [poses_tmp[n][:3, 3] * args.scale for n in sorted(poses_tmp)], dtype=np.float32))
+
+    if args.crop_radius_m:
+        if args.crop_center:
+            centre = to_view_frame(
+                np.array([[float(v) for v in args.crop_center.split(',')]], dtype=np.float32))[0]
+        elif traj_raw is not None:
+            centre = traj_raw.mean(axis=0)
+        else:
+            raise SystemExit('--crop-radius-m 은 --poses 또는 --crop-center 가 필요하다')
+        keep_c = np.linalg.norm(xyz - centre, axis=1) < args.crop_radius_m
+        print('  관심 영역 자르기: %d -> %d점' % (len(xyz), int(keep_c.sum())))
+        xyz, rgb = xyz[keep_c], rgb[keep_c]
+
+    xyz, rgb = voxel_average(xyz, rgb, args.voxel_mm / 1000.0)
 
     c = np.median(xyz, axis=0)
     d = np.linalg.norm(xyz - c, axis=1)
     keep = d < np.percentile(d, args.trim_pct)
     xyz, rgb = xyz[keep], rgb[keep]
 
-    traj = np.zeros((0, 3), dtype=np.float32)
-    if args.poses:
-        poses = read_colmap_images(args.poses)
-        traj = to_view_frame(
-            np.array([poses[n][:3, 3] * args.scale for n in sorted(poses)], dtype=np.float32))
+    traj = traj_raw if traj_raw is not None else np.zeros((0, 3), dtype=np.float32)
 
     lo = xyz.min(0) if not len(traj) else np.minimum(xyz.min(0), traj.min(0))
     hi = xyz.max(0) if not len(traj) else np.maximum(xyz.max(0), traj.max(0))
@@ -207,6 +242,14 @@ TEMPLATE = r'''<title>__TITLE__</title>
   #measList{list-style:none;margin:0 0 10px;padding:0;display:flex;flex-direction:column;gap:5px;
     max-height:150px;overflow-y:auto}
   #measList:empty{display:none}
+  #autoList{list-style:none;margin:0 0 10px;padding:0;display:flex;flex-direction:column;gap:5px}
+  #autoList:empty{display:none}
+  #autoList li{display:flex;align-items:baseline;gap:8px;padding:4px 7px;
+    background:var(--panel-2);border-left:2px solid var(--accent);border-radius:0 3px 3px 0;font-size:11px}
+  #autoList .k{color:var(--accent)}
+  #autoList .v{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .tag.auto{border-color:var(--accent)}
+  .tag.auto b{color:var(--accent)}
   #measList li{display:flex;align-items:baseline;gap:8px;
     padding:4px 5px 4px 7px;background:var(--panel-2);border-radius:3px;font-size:11px}
   #measList .n{color:var(--muted);font-family:var(--mono);font-size:10px}
@@ -259,7 +302,12 @@ TEMPLATE = r'''<title>__TITLE__</title>
 
   <div class="grp">
     <p class="eyebrow">거리 재기</p>
-    <p id="measHint" class="idle">점을 클릭하면 시작점이 찍힙니다.</p>
+    <div class="seg" role="group" aria-label="측정 방식" style="margin-bottom:9px">
+      <button id="mdTwo" aria-pressed="false">두 점 직접</button>
+      <button id="mdAuto" aria-pressed="true">결함 자동</button>
+    </div>
+    <ul id="autoList"></ul>
+    <p id="measHint" class="idle">결함 위를 한 번 클릭하면 세로·가로 최대 길이를 재줍니다.</p>
     <ol id="measList"></ol>
     <div class="btns">
       <button class="btn" id="undo" disabled>마지막 취소</button>
@@ -267,8 +315,10 @@ TEMPLATE = r'''<title>__TITLE__</title>
     </div>
     <p class="note"><b>첫 점을 찍으면 그 자리의 면을 자동으로 찾습니다.</b>
       면이 기울어져 있어도 상관없이, 그 면을 기준으로 두 값을 함께 보여줍니다 —
-      <b>면 따라</b>(면 위에서의 거리)와 <b>면에서</b>(면과 수직으로 떨어진 거리).
-      균열 길이처럼 표면 위를 재면 앞쪽, 모니터와 책상 틈처럼 떨어진 정도를 재면 뒤쪽을 보면 됩니다.</p>
+      <b>면 따라</b>(면 위에서의 거리)와 <b>면에서</b>(면과 수직으로 떨어진 거리).</p>
+    <p class="note"><b>결함 자동</b> 모드는 클릭한 자리 주변에서 주변보다 어두운 부분을 결함으로 보고,
+      그 <b>바깥 끝에서 끝까지</b>의 세로·가로 최대 길이를 재줍니다(강조색). 점구름에서 결함의
+      가장자리를 손으로 정확히 집으면 클릭이 안쪽 점에 걸려 실제보다 짧게 재지기 때문입니다.</p>
     <p class="note">클릭 자리 주변 점들의 중앙값을 씁니다(괄호 안이 쓰인 점 개수).
       <b>10cm 미만은 오차가 커서 신뢰하기 어렵고</b> 1m 이상에서 가장 정확합니다.
       확대한 뒤 클릭하면 더 정확합니다.</p>
@@ -291,6 +341,7 @@ TEMPLATE = r'''<title>__TITLE__</title>
     <div class="ctl">
       <div class="seg" role="group" aria-label="색 표현 방식">
         <button id="mRgb" aria-pressed="true">사진 색</button>
+        <button id="mBoost" aria-pressed="false">대비 강조</button>
         <button id="mHeight" aria-pressed="false">높이</button>
       </div>
       <div class="row">
@@ -352,6 +403,26 @@ TEMPLATE = r'''<title>__TITLE__</title>
     colRgb[i*3+1] = Math.pow(cols[i*3+1]/255, 2.2);
     colRgb[i*3+2] = Math.pow(cols[i*3+2]/255, 2.2);
   }
+  // 대비 강조: 표면의 얕은 결함은 색 차이가 아주 작다(실측: 255 중 6~19).
+  // 밝기 분포의 20~80% 구간을 전체 범위로 펴서 그 차이를 눈에 보이게 만든다.
+  // 점검 사진의 밝기/대비를 조정하는 것과 같은 일 — 형상이 아니라 **보기**를
+  // 돕는 것이므로, 여기 보이는 얼룩이 곧 깊이 차이라는 뜻은 아니다.
+  var lum = new Float32Array(N);
+  for (var q=0;q<N;q++) lum[q] = 0.299*cols[q*3] + 0.587*cols[q*3+1] + 0.114*cols[q*3+2];
+  var sortedL = Float32Array.from(lum).sort();
+  var lo20 = sortedL[Math.floor(N*0.20)], hi80 = sortedL[Math.floor(N*0.80)];
+  var lspan = Math.max(1e-3, hi80 - lo20);
+  var colB = new Float32Array(N*3);
+  for (var q2=0;q2<N;q2++){
+    var t2 = Math.min(1, Math.max(0, (lum[q2]-lo20)/lspan));
+    // 늘린 밝기를 원래 색조에 다시 입힌다(채도를 약간 살려 평평해 보이지 않게)
+    var base = Math.max(1, lum[q2]);
+    for (var ch=0; ch<3; ch++){
+      var tint = cols[q2*3+ch]/base;
+      colB[q2*3+ch] = Math.min(1, Math.pow(t2,0.85) * (0.65 + 0.35*tint));
+    }
+  }
+
   var colH = new Float32Array(N*3), spanY = (maxY-minY)||1;
   for (var j=0;j<N;j++){
     var t = (pos[j*3+1]-minY)/spanY;
@@ -369,7 +440,10 @@ TEMPLATE = r'''<title>__TITLE__</title>
   var geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
   geo.setAttribute('color', new THREE.BufferAttribute(colRgb,3));
-  var mat = new THREE.PointsMaterial({size:0.010, vertexColors:true, sizeAttenuation:true});
+  // 점 간격(복셀)의 약 1.3배가 면처럼 보이면서 뭉개지지 않는 크기다.
+  // 고정값을 쓰면 촘촘한 클라우드에서 점이 서로 겹쳐 디테일이 사라진다.
+  var PT = (META.voxelMm || 10) / 1000.0;
+  var mat = new THREE.PointsMaterial({size:PT*1.3, vertexColors:true, sizeAttenuation:true});
   var cloud = new THREE.Points(geo, mat);
   scene.add(cloud);
 
@@ -401,6 +475,163 @@ TEMPLATE = r'''<title>__TITLE__</title>
       target.y + st.r*Math.cos(st.phi),
       target.z + st.r*Math.sin(st.phi)*Math.cos(st.theta));
     camera.lookAt(target);
+  }
+
+  var autoDots = [], autoTags = [];
+  var autoDots = [], autoTags = [];
+
+  // ---- 결함 자동 측정 ----
+  // 결함 근처를 한 번 클릭하면 그 결함의 **바깥 끝에서 끝까지** 세로/가로 최대
+  // 길이를 재준다. 손으로 가장자리를 집으면 클릭이 안쪽 점에 걸려 실제보다 짧게
+  // 재지기 때문에 만든 기능이다.
+  //
+  // 전체 화면에서 어두운 곳을 자동으로 찾는 방식을 먼저 만들었다가 폐기했다 —
+  // 그림자와 면 가장자리까지 하나로 이어져 20mm짜리 결함이 380mm로 나왔다.
+  // 사용자가 어느 결함인지 찍어주면 그 주변만 보면 되므로 훨씬 안정적이다.
+  var AUTO_R = 0.10;      // 클릭 주변 100mm 안에서 결함을 찾는다
+  var AUTO_CELL = 0.003;  // 3mm 격자로 이어진 덩어리를 판정
+
+  function autoMeasure(seed){
+    // 1) 주변 점을 모아 국소 평면을 잡는다
+    var idx = [];
+    for (var i=0;i<N;i++){
+      var dx=pos[i*3]-seed.x;   if (dx>AUTO_R||dx<-AUTO_R) continue;
+      var dy=pos[i*3+1]-seed.y; if (dy>AUTO_R||dy<-AUTO_R) continue;
+      var dz=pos[i*3+2]-seed.z; if (dz>AUTO_R||dz<-AUTO_R) continue;
+      if (dx*dx+dy*dy+dz*dz <= AUTO_R*AUTO_R) idx.push(i);
+    }
+    if (idx.length < 200) return null;
+    var mx=0,my=0,mz=0;
+    idx.forEach(function(i){ mx+=pos[i*3]; my+=pos[i*3+1]; mz+=pos[i*3+2]; });
+    mx/=idx.length; my/=idx.length; mz/=idx.length;
+    var cxx=0,cyy=0,czz=0,cxy=0,cxz=0,cyz=0;
+    idx.forEach(function(i){
+      var ax=pos[i*3]-mx, ay=pos[i*3+1]-my, az=pos[i*3+2]-mz;
+      cxx+=ax*ax; cyy+=ay*ay; czz+=az*az; cxy+=ax*ay; cxz+=ax*az; cyz+=ay*az;
+    });
+    var tr=cxx+cyy+czz;
+    var M=[[tr-cxx,-cxy,-cxz],[-cxy,tr-cyy,-cyz],[-cxz,-cyz,tr-czz]];
+    var nv=[0.577,0.577,0.577];
+    for (var it=0; it<40; it++){
+      var a0=M[0][0]*nv[0]+M[0][1]*nv[1]+M[0][2]*nv[2];
+      var a1=M[1][0]*nv[0]+M[1][1]*nv[1]+M[1][2]*nv[2];
+      var a2=M[2][0]*nv[0]+M[2][1]*nv[1]+M[2][2]*nv[2];
+      var L=Math.hypot(a0,a1,a2); if (L<1e-12) return null;
+      nv=[a0/L,a1/L,a2/L];
+    }
+    var nrm = new THREE.Vector3(nv[0],nv[1],nv[2]);
+
+    // 2) 면 안에 세로/가로 축을 세운다. 세로는 월드 위쪽을 면에 투영해서 —
+    //    면이 기울어져 있어도 사람이 보는 "세로"와 맞추기 위함.
+    var up = new THREE.Vector3(0,1,0);
+    up.addScaledVector(nrm, -up.dot(nrm));
+    if (up.lengthSq() < 1e-8) up.set(1,0,0).addScaledVector(nrm, -nrm.x);
+    up.normalize();
+    var right = new THREE.Vector3().crossVectors(nrm, up).normalize();
+
+    // 3) 면 위의 점만 남기고, 그중 주변보다 어두운 점을 결함으로 본다
+    var onFace = [], lums = [];
+    var ctr = new THREE.Vector3(mx,my,mz), tmp = new THREE.Vector3();
+    idx.forEach(function(i){
+      tmp.set(pos[i*3]-mx, pos[i*3+1]-my, pos[i*3+2]-mz);
+      if (Math.abs(tmp.dot(nrm)) > 0.025) return;
+      onFace.push(i);
+      lums.push(0.299*cols[i*3] + 0.587*cols[i*3+1] + 0.114*cols[i*3+2]);
+    });
+    if (onFace.length < 150) return null;
+    var sortedL = Float64Array.from(lums).sort();
+    var med = sortedL[sortedL.length>>1];
+    var q15 = sortedL[Math.floor(sortedL.length*0.15)];
+    var thr = Math.min(q15, med - 12);   // 주변보다 확실히 어두운 것만
+
+    // 4) 클릭 지점에서 시작해 이어진 어두운 덩어리만 따라간다
+    var cells = {}, key;
+    for (var k=0;k<onFace.length;k++){
+      if (lums[k] > thr) continue;
+      var i2 = onFace[k];
+      tmp.set(pos[i2*3]-mx, pos[i2*3+1]-my, pos[i2*3+2]-mz);
+      var gu = Math.floor(tmp.dot(right)/AUTO_CELL), gv = Math.floor(tmp.dot(up)/AUTO_CELL);
+      key = gu+','+gv;
+      (cells[key] || (cells[key]=[])).push({u:tmp.dot(right), v:tmp.dot(up)});
+    }
+    tmp.set(seed.x-mx, seed.y-my, seed.z-mz);
+    var su = Math.floor(tmp.dot(right)/AUTO_CELL), sv = Math.floor(tmp.dot(up)/AUTO_CELL);
+    var start=null, bestD=1e9;
+    Object.keys(cells).forEach(function(kk){
+      var p2=kk.split(','), dd=(p2[0]-su)*(p2[0]-su)+(p2[1]-sv)*(p2[1]-sv);
+      if (dd<bestD){ bestD=dd; start=kk; }
+    });
+    if (!start || bestD > 400) return null;   // 클릭 근처에 어두운 곳이 없음
+    var seen={}, stack=[start], pts=[];
+    seen[start]=1;
+    while (stack.length){
+      var cur=stack.pop().split(',').map(Number);
+      pts = pts.concat(cells[cur[0]+','+cur[1]]);
+      for (var di=-1; di<=1; di++) for (var dj=-1; dj<=1; dj++){
+        var nb=(cur[0]+di)+','+(cur[1]+dj);
+        if (cells[nb] && !seen[nb]){ seen[nb]=1; stack.push(nb); }
+      }
+    }
+    if (pts.length < 30) return null;
+
+    // 5) 가로로 잘게 나눈 칸마다의 세로 폭 중 최대값이 "세로 최대" (반대도 동일).
+    //    단순 바운딩박스를 안 쓰는 이유: 비스듬히 누운 결함이 과하게 크게 나온다.
+    function longest(getA, getB){
+      var bins={};
+      pts.forEach(function(p3){
+        var b=Math.floor(getB(p3)/AUTO_CELL);
+        var e=bins[b] || (bins[b]={lo:1e9,hi:-1e9,mid:0,n:0});
+        var a=getA(p3);
+        if (a<e.lo) e.lo=a; if (a>e.hi) e.hi=a;
+        e.mid+=getB(p3); e.n++;
+      });
+      var best=null;
+      Object.keys(bins).forEach(function(b){
+        var e=bins[b]; if (e.n<3) return;
+        var span=e.hi-e.lo;
+        if (!best || span>best.span) best={span:span, lo:e.lo, hi:e.hi, mid:e.mid/e.n};
+      });
+      return best;
+    }
+    var out=[];
+    var V=longest(function(p3){return p3.v}, function(p3){return p3.u});
+    var Hh=longest(function(p3){return p3.u}, function(p3){return p3.v});
+    function mk(best, axis, other, label){
+      if (!best) return;
+      var a=ctr.clone().addScaledVector(axis,best.lo).addScaledVector(other,best.mid);
+      var b=ctr.clone().addScaledVector(axis,best.hi).addScaledVector(other,best.mid);
+      out.push({a:a,b:b,mm:best.span*1000,label:label});
+    }
+    mk(V, up, right, '세로 최대');
+    mk(Hh, right, up, '가로 최대');
+    return out.length ? out : null;
+  }
+
+  function drawAuto(items){
+    var lm = new THREE.LineBasicMaterial({color:0x5bc8b5});
+    var dm = new THREE.MeshBasicMaterial({color:0x5bc8b5});
+    var sg = new THREE.SphereGeometry(1,10,8);
+    var list = document.getElementById('autoList');
+    items.forEach(function(m){
+      var line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([m.a,m.b]), lm);
+      scene.add(line);
+      var dots=[m.a,m.b].map(function(p4){
+        var s2=new THREE.Mesh(sg,dm); s2.position.copy(p4); scene.add(s2); autoDots.push(s2); return s2;
+      });
+      var el=document.createElement('div'); el.className='tag auto';
+      el.innerHTML='<b>'+m.mm.toFixed(0)+' mm</b><span>'+m.label+'</span>';
+      labels.appendChild(el);
+      autoTags.push({a:m.a,b:m.b,el:el,line:line,dots:dots});
+      var li=document.createElement('li');
+      li.innerHTML='<span class="k">'+m.label+'</span><span class="v">'+m.mm.toFixed(0)+' mm</span>';
+      list.appendChild(li);
+    });
+  }
+  function clearAuto(){
+    autoTags.forEach(function(t){ scene.remove(t.line); t.el.remove();
+      t.dots.forEach(function(d){scene.remove(d)}); });
+    autoTags=[]; autoDots=[];
+    document.getElementById('autoList').innerHTML='';
   }
 
   // ---- 거리 재기 ----
@@ -544,8 +775,21 @@ TEMPLATE = r'''<title>__TITLE__</title>
       hintEl.textContent = '점을 클릭하면 시작점이 찍힙니다.';
     }
   }
+  var autoMode = true;
   function onPick(ev){
     var p = pick(ev);
+    if (p && autoMode){
+      var res = autoMeasure(p.p);
+      clearAuto();
+      if (res){ drawAuto(res);
+        hintEl.className='idle';
+        hintEl.textContent='결함을 쟀습니다. 다른 곳을 클릭하면 다시 잽니다.';
+      } else {
+        hintEl.className='';
+        hintEl.textContent='그 자리에서 결함을 못 찾았습니다 — 어두운 부분 위를 클릭해 보세요.';
+      }
+      return;
+    }
     if (!p){
       hintEl.className = '';
       hintEl.textContent = '그 자리엔 점이 없습니다 — 표면 위를 클릭하세요.';
@@ -626,15 +870,22 @@ TEMPLATE = r'''<title>__TITLE__</title>
   }
   addEventListener('resize',resize);
 
-  var bRgb=document.getElementById('mRgb'), bH=document.getElementById('mHeight');
-  function setMode(rgb){
-    geo.setAttribute('color', new THREE.BufferAttribute(rgb?colRgb:colH,3));
+  var bRgb=document.getElementById('mRgb'), bB=document.getElementById('mBoost'),
+      bH=document.getElementById('mHeight');
+  function setMode(k){
+    geo.setAttribute('color', new THREE.BufferAttribute(
+      k==='rgb'?colRgb : k==='boost'?colB : colH, 3));
     geo.attributes.color.needsUpdate=true;
-    bRgb.setAttribute('aria-pressed', rgb?'true':'false');
-    bH.setAttribute('aria-pressed', rgb?'false':'true');
+    bRgb.setAttribute('aria-pressed', k==='rgb');
+    bB.setAttribute('aria-pressed', k==='boost');
+    bH.setAttribute('aria-pressed', k==='height');
   }
-  bRgb.onclick=function(){setMode(true)}; bH.onclick=function(){setMode(false)};
-  document.getElementById('size').oninput=function(e){ mat.size = 0.0025*Number(e.target.value); };
+  bRgb.onclick=function(){setMode('rgb')};
+  bB.onclick=function(){setMode('boost')};
+  bH.onclick=function(){setMode('height')};
+  var sizeEl = document.getElementById('size');
+  sizeEl.value = 4;                       // 4 = 복셀의 1.3배
+  sizeEl.oninput=function(e){ mat.size = PT*0.325*Number(e.target.value); };
   document.getElementById('traj').onchange=function(e){ trajLine.visible=e.target.checked; };
   document.getElementById('reset').onclick=function(){
     target.set(0,0,0); st.theta=0.62; st.phi=1.18; st.r=radius0; applyCam();
@@ -645,6 +896,16 @@ TEMPLATE = r'''<title>__TITLE__</title>
   document.getElementById('vFront').onclick=function(){ view(0, Math.PI/2); };
   document.getElementById('vSide').onclick =function(){ view(Math.PI/2, Math.PI/2); };
   document.getElementById('vTop').onclick  =function(){ view(0, 0.09); };
+
+  var bTwo=document.getElementById('mdTwo'), bAuto=document.getElementById('mdAuto');
+  function setMeasMode(auto){
+    autoMode=auto;
+    bAuto.setAttribute('aria-pressed', auto); bTwo.setAttribute('aria-pressed', !auto);
+    hintEl.className='idle';
+    hintEl.textContent = auto ? '결함 위를 한 번 클릭하면 세로·가로 최대 길이를 재줍니다.'
+                              : '점을 클릭하면 시작점이 찍힙니다.';
+  }
+  bAuto.onclick=function(){setMeasMode(true)}; bTwo.onclick=function(){setMeasMode(false)};
 
   document.getElementById('docTitle').textContent = META.title;
   document.getElementById('nShown').textContent = N.toLocaleString();
@@ -674,6 +935,14 @@ TEMPLATE = r'''<title>__TITLE__</title>
     if (pending) pending.dot.scale.setScalar(s);
     // 거리 라벨을 선 중점의 화면 좌표에 붙인다
     var w = stage.clientWidth, h = stage.clientHeight;
+    autoTags.forEach(function(m){
+      mid.copy(m.a).add(m.b).multiplyScalar(0.5).project(camera);
+      if (mid.z > 1){ m.el.style.display='none'; return; }
+      m.el.style.display='';
+      m.el.style.left = ((mid.x*0.5+0.5)*w)+'px';
+      m.el.style.top  = ((-mid.y*0.5+0.5)*h)+'px';
+    });
+    autoDots.forEach(function(d){ d.scale.setScalar(Math.max(0.003, st.r*0.005)); });
     measures.forEach(function(m){
       mid.copy(m.a).add(m.b).multiplyScalar(0.5).project(camera);
       if (mid.z > 1){ m.el.style.display='none'; return; }
