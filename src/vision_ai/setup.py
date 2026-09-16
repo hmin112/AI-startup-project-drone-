@@ -26,6 +26,7 @@ setup(
             'vision_ai_node = vision_ai.vision_ai_node:main',
             'recorder_node = vision_ai.recorder_node:main',
             'depth_coverage_node = vision_ai.depth_coverage_node:main',
+            'standoff_node = vision_ai.standoff_node:main',
         ],
     },
 )

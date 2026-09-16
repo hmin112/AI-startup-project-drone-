@@ -195,6 +195,14 @@ def generate_launch_description():
         # 원본 데이터, docs 5번/8번 항목). 개발/벤치 테스트 중에도 계속
         # 녹화되니 디스크 용량 주기적으로 확인할 것 — 필요 없으면 이
         # Node()를 빼고 실행.
+        # 촬영 거리 표시 — depth 노이즈가 거리²에 비례하므로(2026-09 실측:
+        # 0.5m σ5.3mm / 0.65m σ9.2mm / 1.0m σ20.7mm) 0.6~0.8m를 유지해야 한다.
+        Node(
+            package='vision_ai',
+            executable='standoff_node',
+            name='standoff_node',
+            output='screen',
+        ),
         Node(
             package='vision_ai',
             executable='recorder_node',

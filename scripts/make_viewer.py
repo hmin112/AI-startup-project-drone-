@@ -249,6 +249,13 @@ TEMPLATE = r'''<title>__TITLE__</title>
   #autoList .k{color:var(--accent)}
   #autoList .v{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums}
   .tag.auto{border-color:var(--accent)}
+  #profile{margin:0 0 10px;padding:8px 9px;background:var(--panel-2);border-radius:3px}
+  #profCap{font-size:10.5px;color:var(--muted);margin-bottom:4px}
+  #profSvg{display:block;width:100%;height:auto}
+  #profRead{margin:4px 0 0;font-family:var(--mono);font-size:10.5px;color:var(--muted);
+    font-variant-numeric:tabular-nums;min-height:13px}
+  #profSvg text{font-family:var(--mono);font-size:8px;fill:var(--muted)}
+  #profSvg text.val{fill:var(--ink);font-size:9px}
   .tag.auto b{color:var(--accent)}
   #measList li{display:flex;align-items:baseline;gap:8px;
     padding:4px 5px 4px 7px;background:var(--panel-2);border-radius:3px;font-size:11px}
@@ -303,11 +310,16 @@ TEMPLATE = r'''<title>__TITLE__</title>
   <div class="grp">
     <p class="eyebrow">거리 재기</p>
     <div class="seg" role="group" aria-label="측정 방식" style="margin-bottom:9px">
-      <button id="mdTwo" aria-pressed="false">두 점 직접</button>
-      <button id="mdAuto" aria-pressed="true">결함 자동</button>
+      <button id="mdTwo" aria-pressed="false">두 점 거리</button>
+      <button id="mdAuto" aria-pressed="true">단면 보기</button>
     </div>
     <ul id="autoList"></ul>
-    <p id="measHint" class="idle">결함 위를 한 번 클릭하면 세로·가로 최대 길이를 재줍니다.</p>
+    <figure id="profile" hidden>
+      <figcaption id="profCap">단면</figcaption>
+      <svg id="profSvg" viewBox="0 0 268 132" role="img" aria-label="표면 단면 프로파일"></svg>
+      <p id="profRead">&nbsp;</p>
+    </figure>
+    <p id="measHint" class="idle">결함을 가로지르는 두 점을 대충 찍으세요.</p>
     <ol id="measList"></ol>
     <div class="btns">
       <button class="btn" id="undo" disabled>마지막 취소</button>
@@ -316,6 +328,10 @@ TEMPLATE = r'''<title>__TITLE__</title>
     <p class="note"><b>첫 점을 찍으면 그 자리의 면을 자동으로 찾습니다.</b>
       면이 기울어져 있어도 상관없이, 그 면을 기준으로 두 값을 함께 보여줍니다 —
       <b>면 따라</b>(면 위에서의 거리)와 <b>면에서</b>(면과 수직으로 떨어진 거리).</p>
+    <p class="note"><b>단면 보기</b>는 결함을 가로지르는 두 점을 <b>대충</b> 찍으면 그 선을 따라
+      표면이 어떻게 파였는지 그려줍니다. 바깥 평평한 면을 0으로 잡으므로 <b>폭과 깊이를 직접
+      읽을 수 있습니다.</b> 결함 가장자리를 정확히 집을 필요가 없습니다 —
+      자동 검출은 그림자·모서리가 섞여 같은 결함이 36~122mm로 요동쳐 쓰지 않습니다.</p>
     <p class="note"><b>결함 자동</b> 모드는 클릭한 자리 주변에서 주변보다 어두운 부분을 결함으로 보고,
       그 <b>바깥 끝에서 끝까지</b>의 세로·가로 최대 길이를 재줍니다(강조색). 점구름에서 결함의
       가장자리를 손으로 정확히 집으면 클릭이 안쪽 점에 걸려 실제보다 짧게 재지기 때문입니다.</p>
@@ -480,37 +496,43 @@ TEMPLATE = r'''<title>__TITLE__</title>
   var autoDots = [], autoTags = [];
   var autoDots = [], autoTags = [];
 
-  // ---- 결함 자동 측정 ----
-  // 결함 근처를 한 번 클릭하면 그 결함의 **바깥 끝에서 끝까지** 세로/가로 최대
-  // 길이를 재준다. 손으로 가장자리를 집으면 클릭이 안쪽 점에 걸려 실제보다 짧게
-  // 재지기 때문에 만든 기능이다.
+  // ---- 단면 보기 ----
+  // 결함을 가로지르는 두 점을 대충 찍으면, 그 선을 따라 표면이 어떻게 파였는지
+  // 그려서 폭과 깊이를 직접 읽게 한다.
   //
-  // 전체 화면에서 어두운 곳을 자동으로 찾는 방식을 먼저 만들었다가 폐기했다 —
-  // 그림자와 면 가장자리까지 하나로 이어져 20mm짜리 결함이 380mm로 나왔다.
-  // 사용자가 어느 결함인지 찍어주면 그 주변만 보면 되므로 훨씬 안정적이다.
-  var AUTO_R = 0.10;      // 클릭 주변 100mm 안에서 결함을 찾는다
-  var AUTO_CELL = 0.003;  // 3mm 격자로 이어진 덩어리를 판정
+  // 왜 자동 검출 대신 이 방식인가: 색만으로 결함을 분리하려 했더니 그림자와 보드
+  // 모서리가 섞여 같은 결함이 프레임마다 36~122mm로 요동쳤다(2026-09-14 실측).
+  // 사람이 선만 그어주면 나머지는 데이터를 그대로 보여주면 되므로 추정이 끼지 않는다.
+  var SLICE_HALF = 0.004;   // 선에서 좌우 4mm 안의 점을 단면에 쓴다
+  var SLICE_BIN  = 0.002;   // 2mm 간격으로 묶어 중앙값
 
-  function autoMeasure(seed){
-    // 1) 주변 점을 모아 국소 평면을 잡는다
-    var idx = [];
+  function crossSection(p1, p2){
+    var axis = new THREE.Vector3().subVectors(p2, p1);
+    var len = axis.length();
+    if (len < 0.01) return null;
+    axis.normalize();
+
+    // 선 주변의 점을 모아 국소 평면을 잡는다
+    var pad = 0.03, rel = new THREE.Vector3(), got = [];
     for (var i=0;i<N;i++){
-      var dx=pos[i*3]-seed.x;   if (dx>AUTO_R||dx<-AUTO_R) continue;
-      var dy=pos[i*3+1]-seed.y; if (dy>AUTO_R||dy<-AUTO_R) continue;
-      var dz=pos[i*3+2]-seed.z; if (dz>AUTO_R||dz<-AUTO_R) continue;
-      if (dx*dx+dy*dy+dz*dz <= AUTO_R*AUTO_R) idx.push(i);
+      rel.set(pos[i*3]-p1.x, pos[i*3+1]-p1.y, pos[i*3+2]-p1.z);
+      var t = rel.dot(axis);
+      if (t < -pad || t > len+pad) continue;
+      var perp = rel.clone().addScaledVector(axis, -t);
+      if (perp.lengthSq() > 0.0025) continue;      // 선에서 50mm 이내
+      got.push({i:i, t:t, rel:rel.clone()});
     }
-    if (idx.length < 200) return null;
+    if (got.length < 60) return null;
+
     var mx=0,my=0,mz=0;
-    idx.forEach(function(i){ mx+=pos[i*3]; my+=pos[i*3+1]; mz+=pos[i*3+2]; });
-    mx/=idx.length; my/=idx.length; mz/=idx.length;
+    got.forEach(function(g){ mx+=pos[g.i*3]; my+=pos[g.i*3+1]; mz+=pos[g.i*3+2]; });
+    mx/=got.length; my/=got.length; mz/=got.length;
     var cxx=0,cyy=0,czz=0,cxy=0,cxz=0,cyz=0;
-    idx.forEach(function(i){
-      var ax=pos[i*3]-mx, ay=pos[i*3+1]-my, az=pos[i*3+2]-mz;
+    got.forEach(function(g){
+      var ax=pos[g.i*3]-mx, ay=pos[g.i*3+1]-my, az=pos[g.i*3+2]-mz;
       cxx+=ax*ax; cyy+=ay*ay; czz+=az*az; cxy+=ax*ay; cxz+=ax*az; cyz+=ay*az;
     });
-    var tr=cxx+cyy+czz;
-    var M=[[tr-cxx,-cxy,-cxz],[-cxy,tr-cyy,-cyz],[-cxz,-cyz,tr-czz]];
+    var tr=cxx+cyy+czz, M=[[tr-cxx,-cxy,-cxz],[-cxy,tr-cyy,-cyz],[-cxz,-cyz,tr-czz]];
     var nv=[0.577,0.577,0.577];
     for (var it=0; it<40; it++){
       var a0=M[0][0]*nv[0]+M[0][1]*nv[1]+M[0][2]*nv[2];
@@ -520,119 +542,107 @@ TEMPLATE = r'''<title>__TITLE__</title>
       nv=[a0/L,a1/L,a2/L];
     }
     var nrm = new THREE.Vector3(nv[0],nv[1],nv[2]);
+    // 카메라를 향하는 쪽을 바깥(+)으로
+    if (nrm.dot(new THREE.Vector3(camera.position.x-mx, camera.position.y-my,
+                                  camera.position.z-mz)) < 0) nrm.negate();
 
-    // 2) 면 안에 세로/가로 축을 세운다. 세로는 월드 위쪽을 면에 투영해서 —
-    //    면이 기울어져 있어도 사람이 보는 "세로"와 맞추기 위함.
-    var up = new THREE.Vector3(0,1,0);
-    up.addScaledVector(nrm, -up.dot(nrm));
-    if (up.lengthSq() < 1e-8) up.set(1,0,0).addScaledVector(nrm, -nrm.x);
-    up.normalize();
-    var right = new THREE.Vector3().crossVectors(nrm, up).normalize();
-
-    // 3) 면 위의 점만 남기고, 그중 주변보다 어두운 점을 결함으로 본다
-    var onFace = [], lums = [];
-    var ctr = new THREE.Vector3(mx,my,mz), tmp = new THREE.Vector3();
-    idx.forEach(function(i){
-      tmp.set(pos[i*3]-mx, pos[i*3+1]-my, pos[i*3+2]-mz);
-      if (Math.abs(tmp.dot(nrm)) > 0.025) return;
-      onFace.push(i);
-      lums.push(0.299*cols[i*3] + 0.587*cols[i*3+1] + 0.114*cols[i*3+2]);
+    var base = new THREE.Vector3(mx,my,mz);
+    var samples = got.map(function(g){
+      var q = new THREE.Vector3(pos[g.i*3]-base.x, pos[g.i*3+1]-base.y, pos[g.i*3+2]-base.z);
+      return {t:g.t, w:q.dot(nrm)};
     });
-    if (onFace.length < 150) return null;
-    var sortedL = Float64Array.from(lums).sort();
-    var med = sortedL[sortedL.length>>1];
-    var q15 = sortedL[Math.floor(sortedL.length*0.15)];
-    var thr = Math.min(q15, med - 12);   // 주변보다 확실히 어두운 것만
+    // 바깥 평평한 면을 0으로: 파인 곳에 끌려가지 않도록 **상위 60%의 중앙값**을 기준선으로
+    var ws = samples.map(function(x){return x.w}).sort(function(a,b){return b-a});
+    var refW = ws[Math.floor(ws.length*0.20)];
 
-    // 4) 클릭 지점에서 시작해 이어진 어두운 덩어리만 따라간다
-    var cells = {}, key;
-    for (var k=0;k<onFace.length;k++){
-      if (lums[k] > thr) continue;
-      var i2 = onFace[k];
-      tmp.set(pos[i2*3]-mx, pos[i2*3+1]-my, pos[i2*3+2]-mz);
-      var gu = Math.floor(tmp.dot(right)/AUTO_CELL), gv = Math.floor(tmp.dot(up)/AUTO_CELL);
-      key = gu+','+gv;
-      (cells[key] || (cells[key]=[])).push({u:tmp.dot(right), v:tmp.dot(up)});
-    }
-    tmp.set(seed.x-mx, seed.y-my, seed.z-mz);
-    var su = Math.floor(tmp.dot(right)/AUTO_CELL), sv = Math.floor(tmp.dot(up)/AUTO_CELL);
-    var start=null, bestD=1e9;
-    Object.keys(cells).forEach(function(kk){
-      var p2=kk.split(','), dd=(p2[0]-su)*(p2[0]-su)+(p2[1]-sv)*(p2[1]-sv);
-      if (dd<bestD){ bestD=dd; start=kk; }
+    var bins = {};
+    samples.forEach(function(x){
+      var b = Math.round(x.t/SLICE_BIN);
+      (bins[b] || (bins[b]=[])).push(x.w);
     });
-    if (!start || bestD > 400) return null;   // 클릭 근처에 어두운 곳이 없음
-    var seen={}, stack=[start], pts=[];
-    seen[start]=1;
-    while (stack.length){
-      var cur=stack.pop().split(',').map(Number);
-      pts = pts.concat(cells[cur[0]+','+cur[1]]);
-      for (var di=-1; di<=1; di++) for (var dj=-1; dj<=1; dj++){
-        var nb=(cur[0]+di)+','+(cur[1]+dj);
-        if (cells[nb] && !seen[nb]){ seen[nb]=1; stack.push(nb); }
-      }
-    }
-    if (pts.length < 30) return null;
-
-    // 5) 가로로 잘게 나눈 칸마다의 세로 폭 중 최대값이 "세로 최대" (반대도 동일).
-    //    단순 바운딩박스를 안 쓰는 이유: 비스듬히 누운 결함이 과하게 크게 나온다.
-    function longest(getA, getB){
-      var bins={};
-      pts.forEach(function(p3){
-        var b=Math.floor(getB(p3)/AUTO_CELL);
-        var e=bins[b] || (bins[b]={lo:1e9,hi:-1e9,mid:0,n:0});
-        var a=getA(p3);
-        if (a<e.lo) e.lo=a; if (a>e.hi) e.hi=a;
-        e.mid+=getB(p3); e.n++;
+    var prof = Object.keys(bins).map(Number).sort(function(a,b){return a-b})
+      .filter(function(b){ return bins[b].length >= 3; })
+      .map(function(b){
+        var arr = bins[b].sort(function(u,v){return u-v});
+        return {x: b*SLICE_BIN*1000, d: (arr[arr.length>>1] - refW)*1000};
       });
-      var best=null;
-      Object.keys(bins).forEach(function(b){
-        var e=bins[b]; if (e.n<3) return;
-        var span=e.hi-e.lo;
-        if (!best || span>best.span) best={span:span, lo:e.lo, hi:e.hi, mid:e.mid/e.n};
-      });
-      return best;
-    }
-    var out=[];
-    var V=longest(function(p3){return p3.v}, function(p3){return p3.u});
-    var Hh=longest(function(p3){return p3.u}, function(p3){return p3.v});
-    function mk(best, axis, other, label){
-      if (!best) return;
-      var a=ctr.clone().addScaledVector(axis,best.lo).addScaledVector(other,best.mid);
-      var b=ctr.clone().addScaledVector(axis,best.hi).addScaledVector(other,best.mid);
-      out.push({a:a,b:b,mm:best.span*1000,label:label});
-    }
-    mk(V, up, right, '세로 최대');
-    mk(Hh, right, up, '가로 최대');
-    return out.length ? out : null;
+    if (prof.length < 8) return null;
+    return {prof:prof, p1:p1, p2:p2};
   }
 
-  function drawAuto(items){
-    var lm = new THREE.LineBasicMaterial({color:0x5bc8b5});
-    var dm = new THREE.MeshBasicMaterial({color:0x5bc8b5});
-    var sg = new THREE.SphereGeometry(1,10,8);
-    var list = document.getElementById('autoList');
-    items.forEach(function(m){
-      var line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([m.a,m.b]), lm);
-      scene.add(line);
-      var dots=[m.a,m.b].map(function(p4){
-        var s2=new THREE.Mesh(sg,dm); s2.position.copy(p4); scene.add(s2); autoDots.push(s2); return s2;
-      });
-      var el=document.createElement('div'); el.className='tag auto';
-      el.innerHTML='<b>'+m.mm.toFixed(0)+' mm</b><span>'+m.label+'</span>';
-      labels.appendChild(el);
-      autoTags.push({a:m.a,b:m.b,el:el,line:line,dots:dots});
-      var li=document.createElement('li');
-      li.innerHTML='<span class="k">'+m.label+'</span><span class="v">'+m.mm.toFixed(0)+' mm</span>';
-      list.appendChild(li);
+  var profFig = document.getElementById('profile');
+  var profSvg = document.getElementById('profSvg');
+  var profCap = document.getElementById('profCap');
+  var profRead = document.getElementById('profRead');
+
+  function drawProfile(sec){
+    var prof = sec.prof;
+    var W=268, H=132, mL=30, mR=8, mT=10, mB=18;
+    var xs=prof.map(function(p){return p.x}), ds=prof.map(function(p){return p.d});
+    var x0=Math.min.apply(null,xs), x1=Math.max.apply(null,xs);
+    var dMin=Math.min.apply(null,ds), dMax=Math.max.apply(null,ds);
+    var pad=Math.max(1.5,(dMax-dMin)*0.15);
+    var yTop=dMax+pad, yBot=dMin-pad;
+    var X=function(v){ return mL+(v-x0)/Math.max(1e-6,x1-x0)*(W-mL-mR); };
+    var Y=function(v){ return mT+(yTop-v)/Math.max(1e-6,yTop-yBot)*(H-mT-mB); };
+
+    var deepest=prof.reduce(function(a,b){return b.d<a.d?b:a});
+    // 폭: 가장 깊은 값의 25%보다 깊게 파인 구간
+    var lvl=deepest.d*0.25, first=null, last=null;
+    prof.forEach(function(p){ if(p.d<=lvl){ if(first===null)first=p.x; last=p.x; } });
+    var width = (first!==null && last!==null) ? (last-first) : 0;
+
+    var g='';
+    // 격자는 뒤로 물린다 — 기준선(바깥 면)만 점선으로 강조
+    [yTop, (yTop+yBot)/2, yBot].forEach(function(v){
+      g+='<line x1="'+mL+'" y1="'+Y(v).toFixed(1)+'" x2="'+(W-mR)+'" y2="'+Y(v).toFixed(1)+
+         '" stroke="#253438" stroke-width="1"/>';
+      g+='<text x="'+(mL-4)+'" y="'+(Y(v)+3).toFixed(1)+'" text-anchor="end">'+v.toFixed(0)+'</text>';
+    });
+    g+='<line x1="'+mL+'" y1="'+Y(0).toFixed(1)+'" x2="'+(W-mR)+'" y2="'+Y(0).toFixed(1)+
+       '" stroke="#7f9296" stroke-width="1" stroke-dasharray="3 3"/>';
+    if (width>0){
+      g+='<rect x="'+X(first).toFixed(1)+'" y="'+mT+'" width="'+(X(last)-X(first)).toFixed(1)+
+         '" height="'+(H-mT-mB)+'" fill="#5bc8b5" opacity="0.10"/>';
+    }
+    var dpath=prof.map(function(p,i){ return (i?'L':'M')+X(p.x).toFixed(1)+' '+Y(p.d).toFixed(1); }).join(' ');
+    g+='<path d="'+dpath+'" fill="none" stroke="#5bc8b5" stroke-width="2" stroke-linejoin="round"/>';
+    g+='<circle cx="'+X(deepest.x).toFixed(1)+'" cy="'+Y(deepest.d).toFixed(1)+
+       '" r="3" fill="#5bc8b5" stroke="#141d20" stroke-width="2"/>';
+    g+='<text class="val" x="'+Math.min(W-mR-2,X(deepest.x)+6).toFixed(1)+'" y="'+
+       Math.max(mT+9,Y(deepest.d)-5).toFixed(1)+'">'+deepest.d.toFixed(1)+' mm</text>';
+    g+='<text x="'+mL+'" y="'+(H-5)+'">0</text>';
+    g+='<text x="'+(W-mR)+'" y="'+(H-5)+'" text-anchor="end">'+(x1-x0).toFixed(0)+' mm</text>';
+    g+='<rect id="profHit" x="'+mL+'" y="'+mT+'" width="'+(W-mL-mR)+'" height="'+(H-mT-mB)+
+       '" fill="transparent"/>';
+    g+='<line id="profCross" x1="0" y1="'+mT+'" x2="0" y2="'+(H-mB)+
+       '" stroke="#dce6e8" stroke-width="1" opacity="0"/>';
+    profSvg.innerHTML=g;
+    profFig.hidden=false;
+    profCap.textContent='단면 — 바깥 면을 0으로, 아래가 파인 쪽';
+    profRead.textContent='최대 깊이 '+deepest.d.toFixed(1)+' mm'+
+      (width>0 ? ' · 파인 폭 '+width.toFixed(0)+' mm' : '');
+
+    // 호버 십자선: 임의 지점의 깊이를 읽을 수 있게
+    var hit=profSvg.querySelector('#profHit'), cross=profSvg.querySelector('#profCross');
+    hit.addEventListener('mousemove', function(e){
+      var r=profSvg.getBoundingClientRect();
+      var px=(e.clientX-r.left)/r.width*W;
+      var mm=x0+(px-mL)/(W-mL-mR)*(x1-x0);
+      var nearest=prof.reduce(function(a,b){return Math.abs(b.x-mm)<Math.abs(a.x-mm)?b:a});
+      cross.setAttribute('x1',X(nearest.x).toFixed(1));
+      cross.setAttribute('x2',X(nearest.x).toFixed(1));
+      cross.setAttribute('opacity','0.5');
+      profRead.textContent=(nearest.x-x0).toFixed(0)+' mm 지점 · 깊이 '+nearest.d.toFixed(1)+' mm';
+    });
+    hit.addEventListener('mouseleave', function(){
+      cross.setAttribute('opacity','0');
+      profRead.textContent='최대 깊이 '+deepest.d.toFixed(1)+' mm'+
+        (width>0 ? ' · 파인 폭 '+width.toFixed(0)+' mm' : '');
     });
   }
-  function clearAuto(){
-    autoTags.forEach(function(t){ scene.remove(t.line); t.el.remove();
-      t.dots.forEach(function(d){scene.remove(d)}); });
-    autoTags=[]; autoDots=[];
-    document.getElementById('autoList').innerHTML='';
-  }
+
+  var autoDots = [], autoTags = [];
 
   // ---- 거리 재기 ----
   var raycaster = new THREE.Raycaster();
@@ -775,19 +785,30 @@ TEMPLATE = r'''<title>__TITLE__</title>
       hintEl.textContent = '점을 클릭하면 시작점이 찍힙니다.';
     }
   }
-  var autoMode = true;
+  var sectionMode = true;
   function onPick(ev){
     var p = pick(ev);
-    if (p && autoMode){
-      var res = autoMeasure(p.p);
-      clearAuto();
-      if (res){ drawAuto(res);
-        hintEl.className='idle';
-        hintEl.textContent='결함을 쟀습니다. 다른 곳을 클릭하면 다시 잽니다.';
-      } else {
-        hintEl.className='';
-        hintEl.textContent='그 자리에서 결함을 못 찾았습니다 — 어두운 부분 위를 클릭해 보세요.';
+    if (sectionMode){
+      if (!p){ hintEl.className=''; hintEl.textContent='표면 위를 클릭하세요.'; return; }
+      if (!pending){
+        pending = {a:p.p, n:p.n, dot:addDot(p.p), normal:null};
+        hintEl.className=''; hintEl.textContent='결함 반대편을 클릭하세요. (Esc 취소)';
+        undoBtn.disabled=false; clearBtn.disabled=false;
+        return;
       }
+      var sec = crossSection(pending.a, p.p);
+      clearAuto();
+      var lm=new THREE.LineBasicMaterial({color:0x5bc8b5});
+      var line=new THREE.Line(new THREE.BufferGeometry().setFromPoints([pending.a,p.p]), lm);
+      scene.add(line);
+      autoTags.push({a:pending.a,b:p.p,el:document.createElement('div'),line:line,
+                     dots:[pending.dot, addDot(p.p)]});
+      pending=null;
+      if (sec){ drawProfile(sec); hintEl.className='idle';
+        hintEl.textContent='단면을 그렸습니다. 다시 두 점을 찍으면 갱신됩니다.'; }
+      else { profFig.hidden=true; hintEl.className='';
+        hintEl.textContent='그 선에서는 점이 부족합니다 — 표면 위를 가로지르게 찍어주세요.'; }
+      refreshUI();
       return;
     }
     if (!p){
@@ -897,15 +918,16 @@ TEMPLATE = r'''<title>__TITLE__</title>
   document.getElementById('vSide').onclick =function(){ view(Math.PI/2, Math.PI/2); };
   document.getElementById('vTop').onclick  =function(){ view(0, 0.09); };
 
-  var bTwo=document.getElementById('mdTwo'), bAuto=document.getElementById('mdAuto');
-  function setMeasMode(auto){
-    autoMode=auto;
-    bAuto.setAttribute('aria-pressed', auto); bTwo.setAttribute('aria-pressed', !auto);
+  var bTwo=document.getElementById('mdTwo'), bSec=document.getElementById('mdAuto');
+  function setMeasMode(sec){
+    sectionMode=sec;
+    bSec.setAttribute('aria-pressed', sec); bTwo.setAttribute('aria-pressed', !sec);
+    if (pending){ scene.remove(pending.dot); pending=null; }
     hintEl.className='idle';
-    hintEl.textContent = auto ? '결함 위를 한 번 클릭하면 세로·가로 최대 길이를 재줍니다.'
-                              : '점을 클릭하면 시작점이 찍힙니다.';
+    hintEl.textContent = sec ? '결함을 가로지르는 두 점을 대충 찍으세요.'
+                             : '점을 클릭하면 시작점이 찍힙니다.';
   }
-  bAuto.onclick=function(){setMeasMode(true)}; bTwo.onclick=function(){setMeasMode(false)};
+  bSec.onclick=function(){setMeasMode(true)}; bTwo.onclick=function(){setMeasMode(false)};
 
   document.getElementById('docTitle').textContent = META.title;
   document.getElementById('nShown').textContent = N.toLocaleString();

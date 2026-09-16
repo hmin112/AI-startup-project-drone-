@@ -29,11 +29,36 @@
   #drone-status .value.warn { color: #fbbf24; }
   #coverage-summary { font-size: 0.85rem; color: #9ca3af; margin-bottom: 8px; }
   #coverage-canvas { background: #181d25; border: 1px solid #2a2f38; border-radius: 8px; margin-bottom: 20px; display: block; }
+  /* 촬영 거리 — 지상국에서 옆 사람이 보고 불러주는 용도라 멀리서도 읽혀야 한다 */
+  .standoff { padding: 14px 16px; border-radius: 6px; border-left: 6px solid #666;
+              background: #1b1b1b; margin-bottom: 12px; }
+  .standoff .st-state { font-size: 26px; font-weight: 700; line-height: 1.1; }
+  .standoff .st-dist  { font-size: 40px; font-weight: 700; line-height: 1.1;
+                        font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .standoff .st-hint  { font-size: 14px; opacity: .85; margin-top: 4px; }
+  .standoff .st-target{ font-size: 12px; opacity: .6; margin-top: 6px; }
+  .standoff.ok        { border-left-color: #3fb950; }
+  .standoff.ok .st-state, .standoff.ok .st-dist { color: #3fb950; }
+  .standoff.close, .standoff.far { border-left-color: #d29922; }
+  .standoff.close .st-state, .standoff.far .st-state,
+  .standoff.close .st-dist,  .standoff.far .st-dist  { color: #d29922; }
+  .standoff.too_close { border-left-color: #f85149; }
+  .standoff.too_close .st-state, .standoff.too_close .st-dist { color: #f85149; }
+  .standoff.unknown   { border-left-color: #6e7681; }
+  .standoff.unknown .st-state, .standoff.unknown .st-dist { color: #8b949e; }
 </style>
 </head>
 <body>
   <h1>Bridge Drone Dashboard</h1>
   <div id="status" class="disconnected">연결 중...</div>
+
+  <h2>촬영 거리</h2>
+  <div id="standoff" class="standoff unknown">
+    <div class="st-state">연결 대기</div>
+    <div class="st-dist">—</div>
+    <div class="st-hint">standoff_node가 켜져 있어야 표시됩니다</div>
+    <div class="st-target"></div>
+  </div>
 
   <h2>드론 상태</h2>
   <div id="drone-status">
@@ -140,6 +165,8 @@
         } else {
           render(parsed);
         }
+      } else if (parsed.state && 'standoff_m' in parsed) {
+        renderStandoff(parsed);
       } else if (parsed.covered_cells) {
         renderCoverageGrid(parsed);
       } else {
@@ -220,6 +247,30 @@
       `;
       taggedRowsEl.appendChild(tr);
     }
+  }
+
+  // 촬영 거리 표시 — 조종자는 FPV 고글을 보고 있어 이 화면을 못 보므로,
+  // 지상국에서 옆 사람이 보고 불러주는 용도다. 그래서 숫자보다 **상태를
+  // 멀리서도 읽히게** 크게 표시한다.
+  function renderStandoff(s) {
+    const box = document.getElementById('standoff');
+    if (!box) return;
+    const labels = {
+      ok: ['적정', '이 거리를 유지하세요'],
+      close: ['가까움', '조금 물러나세요'],
+      too_close: ['너무 가까움', 'depth를 믿을 수 없습니다'],
+      far: ['멂', '조금 다가가세요'],
+      unknown: ['측정 불가', 'depth가 잡히는 곳을 향하세요'],
+    };
+    const [title, hint] = labels[s.state] || labels.unknown;
+    box.className = 'standoff ' + s.state;
+    box.querySelector('.st-state').textContent = title;
+    box.querySelector('.st-dist').textContent =
+      s.standoff_m === null ? '—' : s.standoff_m.toFixed(2) + ' m';
+    box.querySelector('.st-hint').textContent = hint;
+    box.querySelector('.st-target').textContent =
+      '목표 ' + s.target_m[0].toFixed(2) + '~' + s.target_m[1].toFixed(2) + ' m'
+      + ' · depth 유효 ' + Math.round(s.depth_coverage * 100) + '%';
   }
 
   function renderCoverageGrid(status) {
