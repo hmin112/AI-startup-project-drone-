@@ -30,6 +30,13 @@
 # 사용법:
 #   ./capture_bag.sh start [이름]   # 카메라 기동 + 녹화 시작
 #   ./capture_bag.sh stop           # 녹화/카메라 정지 + 결과 요약
+#
+#   MONITOR=1 ./capture_bag.sh start [이름]
+#     촬영 품질 모니터(capture_monitor_node + web_dashboard)를 함께 띄운다.
+#     거리·선명도·특징점·녹화상태를 지상국 브라우저에서 실시간으로 볼 수 있어
+#     "이 패스를 다시 찍어야 하나"를 착륙 전에 판단할 수 있다.
+#     기본은 꺼둔다 — 이 워크플로의 전제가 촬영 중 CPU를 비워두는 것이기 때문.
+#     켜기 전에 프레임 드롭이 늘지 않는지 확인할 것.
 
 set -euo pipefail
 
@@ -84,6 +91,14 @@ start() {
     -o "$out" "${TOPICS[@]}" \
     > /tmp/capture_bag.log 2>&1 < /dev/null &
 
+  if [ "${MONITOR:-0}" = "1" ]; then
+    echo "[3/3] 촬영 품질 모니터 기동 (지상국: http://<젯슨IP>:8080)"
+    setsid nohup ros2 run vision_ai capture_monitor_node --ros-args \
+      -p "bag_dir:=$out" > /tmp/capture_monitor.log 2>&1 < /dev/null &
+    setsid nohup ros2 run web_dashboard web_dashboard_node \
+      > /tmp/capture_dashboard.log 2>&1 < /dev/null &
+  fi
+
   echo "$out" > "$STATE_FILE"
   echo "녹화 중. 끝나면 './capture_bag.sh stop'"
 }
@@ -100,6 +115,8 @@ stop() {
   # (SIGKILL로 죽이면 metadata.yaml이 안 써져서 bag이 못 읽히게 됨)
   pkill -INT -f 'ros2 bag record' || true
   sleep 3
+  pkill -f 'capture_monitor_node' || true
+  pkill -f 'web_dashboard_node' || true
   pkill -f 'realsense2_camera_node' || true
   rm -f "$STATE_FILE"
 

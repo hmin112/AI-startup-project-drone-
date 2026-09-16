@@ -199,8 +199,8 @@ def generate_launch_description():
         # 0.5m σ5.3mm / 0.65m σ9.2mm / 1.0m σ20.7mm) 0.6~0.8m를 유지해야 한다.
         Node(
             package='vision_ai',
-            executable='standoff_node',
-            name='standoff_node',
+            executable='capture_monitor_node',
+            name='capture_monitor_node',
             output='screen',
         ),
         Node(

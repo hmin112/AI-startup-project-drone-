@@ -46,18 +46,29 @@
   .standoff.too_close .st-state, .standoff.too_close .st-dist { color: #f85149; }
   .standoff.unknown   { border-left-color: #6e7681; }
   .standoff.unknown .st-state, .standoff.unknown .st-dist { color: #8b949e; }
+  .st-rows { margin-top: 10px; border-top: 1px solid #333; padding-top: 8px;
+             display: flex; flex-direction: column; gap: 4px; }
+  .qrow { display: flex; align-items: baseline; gap: 8px; font-size: 14px; }
+  .qrow .qk { width: 60px; opacity: .65; }
+  .qrow .qv { flex: 1; font-weight: 600; }
+  .qrow .qn { font-variant-numeric: tabular-nums; opacity: .8; }
+  .qrow.good .qv { color: #3fb950; }
+  .qrow.warn .qv { color: #d29922; }
+  .qrow.bad  .qv { color: #f85149; }
+  .qrow.idle .qv { color: #8b949e; }
 </style>
 </head>
 <body>
   <h1>Bridge Drone Dashboard</h1>
   <div id="status" class="disconnected">연결 중...</div>
 
-  <h2>촬영 거리</h2>
+  <h2>촬영 품질</h2>
   <div id="standoff" class="standoff unknown">
     <div class="st-state">연결 대기</div>
     <div class="st-dist">—</div>
     <div class="st-hint">standoff_node가 켜져 있어야 표시됩니다</div>
     <div class="st-target"></div>
+    <div class="st-rows"></div>
   </div>
 
   <h2>드론 상태</h2>
@@ -165,7 +176,7 @@
         } else {
           render(parsed);
         }
-      } else if (parsed.state && 'standoff_m' in parsed) {
+      } else if (parsed.capture_quality) {
         renderStandoff(parsed);
       } else if (parsed.covered_cells) {
         renderCoverageGrid(parsed);
@@ -271,6 +282,24 @@
     box.querySelector('.st-target').textContent =
       '목표 ' + s.target_m[0].toFixed(2) + '~' + s.target_m[1].toFixed(2) + ' m'
       + ' · depth 유효 ' + Math.round(s.depth_coverage * 100) + '%';
+
+    // 스캔을 망치는 나머지 원인들 — 셋 다 나중에 SfM이 깨져야 알 수 있던 것이라
+    // 촬영 중에 보여주는 게 이 화면의 존재 이유다.
+    const rows = [
+      ['선명도', s.blur_state === 'blurred' ? '흔들림 — 천천히' : '양호',
+       Math.round(s.sharpness_ratio * 100) + '%', s.blur_state],
+      ['특징점', s.texture_state === 'weak' ? '부족 — SfM 위험' : '충분',
+       s.features + '개', s.texture_state],
+      ['녹화', s.rec_state === 'stalled' ? '멈춤!' : (s.rec_state === 'ok' ? '진행 중' : '—'),
+       s.bag_bytes ? (s.bag_bytes / 1e9).toFixed(2) + ' GB' : '—', s.rec_state],
+      ['프레임', '수신 중', s.fps.toFixed(1) + ' fps', 'ok'],
+    ];
+    const cls = { blurred: 'warn', weak: 'warn', stalled: 'bad', ok: 'good', unknown: 'idle' };
+    box.querySelector('.st-rows').innerHTML = rows.map(
+      ([k, v, n, st]) => '<div class="qrow ' + (cls[st] || 'idle') + '">' +
+        '<span class="qk">' + k + '</span>' +
+        '<span class="qv">' + v + '</span>' +
+        '<span class="qn">' + n + '</span></div>').join('');
   }
 
   function renderCoverageGrid(status) {

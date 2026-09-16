@@ -49,7 +49,7 @@ class WebDashboardNode(Node):
             '/drone_core/status',
             '/crack_fusion/tagged_detections',
             '/coverage_grid/status',
-            '/vision_ai/standoff',
+            '/vision_ai/capture_quality',
         ):
             self.create_subscription(String, topic, self._relay_text, 10)
         self.create_subscription(
