@@ -91,6 +91,10 @@ def measure_mask(mask, depth_img, depth_scale, intr):
         'width_mm': float(short_px / fx * cz * 1000.0),
         'center_camera_m': [float(v) for v in center3d],
         'pixels': int(xs.size),
+        'distance_m': float(cz),
+        # 리포트에 증거 사진을 싣기 위한 화면상 위치. 사람이 "정말 균열인가"를
+        # 눈으로 확인할 수 있어야 자동 탐지 결과를 믿고 쓸 수 있다.
+        'bbox_px': [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())],
     }
 
 
@@ -109,10 +113,14 @@ def merge(observations, radius_m):
             clusters.append({'sum': p.copy(), 'n': 1, 'obs': [obs]})
 
     out = []
-    for c in clusters:
+    for idx, c in enumerate(clusters):
         lens = [o['length_mm'] for o in c['obs']]
         wids = [o['width_mm'] for o in c['obs']]
         confs = [o['confidence'] for o in c['obs']]
+        dists = [o.get('distance_m', 0.0) for o in c['obs']]
+        # 증거 사진으로는 **가장 신뢰도 높은 관측**을 쓴다 — 그 프레임이 보통
+        # 가장 또렷하게 찍힌 것이라 사람이 판단하기 좋다.
+        best = max(c['obs'], key=lambda o: o['confidence'])
         out.append({
             'map_position_m': (c['sum'] / c['n']).tolist(),
             'observations': c['n'],
@@ -120,9 +128,15 @@ def merge(observations, radius_m):
             'width_mm_median': float(np.median(wids)),
             'confidence_max': float(max(confs)),
             'confidence_median': float(np.median(confs)),
+            'distance_m_median': float(np.median(dists)),
+            'evidence': {'frame': best['frame'], 'bbox_px': best['bbox_px'],
+                         'confidence': best['confidence'],
+                         'length_mm': best['length_mm'], 'width_mm': best['width_mm']},
             'frames': sorted({o['frame'] for o in c['obs']}),
         })
     out.sort(key=lambda d: -d['observations'])
+    for i, c in enumerate(out, 1):
+        c['id'] = 'C%03d' % i
     return out
 
 
@@ -137,7 +151,13 @@ def main():
     ap.add_argument('--merge-radius-mm', type=float, default=150.0,
                     help='같은 균열로 묶을 map 좌표 반경(기본 150mm)')
     ap.add_argument('--min-observations', type=int, default=1,
-                    help='이보다 적게 관측된 후보는 버린다 — 헛탐지를 거르는 주된 수단')
+                    help='이보다 적게 관측된 후보는 버린다 — 헛탐지를 거르는 수단 중 하나')
+    ap.add_argument('--max-width-mm', type=float,
+                    help='이보다 폭이 넓은 후보는 버린다. 2026-09-14 실측에서 균열이 0개인 '
+                         '장면의 헛탐지가 폭 35~110mm로 나온 반면 실제 균열은 mm 단위이므로 '
+                         '유력한 구분자다. **다만 진짜 균열 표본이 없어 기준값은 아직 추측** — '
+                         '양성 표본을 얻은 뒤 두 분포를 비교해 정할 것')
+    ap.add_argument('--scan-name', default='', help='리포트에 표시할 스캔 이름')
     args = ap.parse_args()
 
     from ultralytics import YOLO
@@ -177,12 +197,21 @@ def main():
 
     cracks = merge(observations, args.merge_radius_mm / 1000.0)
     kept = [c for c in cracks if c['observations'] >= args.min_observations]
+    if args.max_width_mm is not None:
+        before = len(kept)
+        kept = [c for c in kept if c['width_mm_median'] <= args.max_width_mm]
+        print('  폭 %.0fmm 초과로 제외: %d개' % (args.max_width_mm, before - len(kept)))
 
     with open(args.out, 'w', encoding='utf-8') as f:
-        json.dump({'cracks': kept, 'total_observations': len(observations),
+        json.dump({'scan_name': args.scan_name or os.path.basename(args.frames.rstrip('/')),
+                   'frames_dir': os.path.abspath(args.frames),
+                   'model': os.path.basename(args.model),
+                   'cracks': kept, 'total_observations': len(observations),
                    'clusters_before_filter': len(cracks),
+                   'frames_processed': len(poses),
                    'conf_threshold': args.conf,
-                   'min_observations': args.min_observations}, f, indent=2)
+                   'min_observations': args.min_observations,
+                   'max_width_mm': args.max_width_mm}, f, indent=2, ensure_ascii=False)
 
     print('\n관측 %d건 -> 후보 %d개 (관측 %d회 이상만 남기면 %d개)'
           % (len(observations), len(cracks), args.min_observations, len(kept)))
