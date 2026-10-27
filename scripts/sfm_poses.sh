@@ -20,11 +20,16 @@ WORK="${2:-$FRAMES/colmap}"
 IMAGES="$FRAMES/images"
 
 if [ ! -d "$IMAGES" ]; then
-  echo "에러: $IMAGES 가 없다 — extract_frames.py 출력 디렉토리를 지정할 것" >&2
+  echo "에러: $IMAGES 가 없다 — read_bag.py 출력 디렉토리를 지정할 것" >&2
   exit 1
 fi
 
-command -v colmap >/dev/null || { echo "에러: colmap이 없다 (brew install colmap)" >&2; exit 1; }
+command -v colmap >/dev/null || {
+  echo "에러: colmap이 없다." >&2
+  echo "  젯슨/우분투: sudo apt install colmap     (arm64 패키지가 있다)" >&2
+  echo "  맥          : brew install colmap" >&2
+  exit 1
+}
 
 mkdir -p "$WORK/sparse"
 DB="$WORK/database.db"
