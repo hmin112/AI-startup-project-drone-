@@ -89,6 +89,60 @@ def voxel_average(xyz, rgb, voxel_m):
 
 
 
+CRACK_THUMB_W = 260
+
+
+def load_cracks(path, frames_dir):
+    """결함 목록을 읽고, 각 결함의 증거 사진을 작은 썸네일로 끼워 넣는다.
+
+    3D에 점만 찍어두면 "이게 진짜 균열인가"를 판단할 방법이 없다. 2026-09-14에
+    균열이 전혀 없는 장면에서 후보 6개가 나온 적이 있으므로(정체는 케이블과 포스터),
+    표시와 함께 **그 자리의 사진을 바로 볼 수 있어야** 쓸모가 있다.
+    """
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+    frames_dir = frames_dir or data.get('frames_dir', '')
+
+    out = []
+    for c in data.get('cracks', []):
+        thumb = None
+        ev = c.get('evidence') or {}
+        img_path = os.path.join(frames_dir, 'images', ev.get('frame', ''))
+        if ev.get('bbox_px') and os.path.exists(img_path):
+            import cv2
+            img = cv2.imread(img_path)
+            if img is not None:
+                h, w = img.shape[:2]
+                x0, y0, x1, y1 = ev['bbox_px']
+                pad = 50
+                cx0, cy0 = max(0, x0 - pad), max(0, y0 - pad)
+                cx1, cy1 = min(w, x1 + pad), min(h, y1 + pad)
+                if cx1 - cx0 > 10 and cy1 - cy0 > 10:
+                    marked = img.copy()
+                    # cv2는 BGR — 결함 강조색 #f2655f(RGB 242,101,95)의 BGR 표기
+                    cv2.rectangle(marked, (x0, y0), (x1, y1), (95, 101, 242), 2)
+                    crop = marked[cy0:cy1, cx0:cx1]
+                    if crop.shape[1] > CRACK_THUMB_W:
+                        sc = CRACK_THUMB_W / crop.shape[1]
+                        crop = cv2.resize(crop, (CRACK_THUMB_W, int(crop.shape[0] * sc)),
+                                          interpolation=cv2.INTER_AREA)
+                    ok, buf = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                    if ok:
+                        thumb = base64.b64encode(buf).decode()
+        out.append({
+            'id': c['id'],
+            'pos': [float(v) for v in c['map_position_m']],
+            'length_mm': float(c['length_mm_median']),
+            'width_mm': float(c['width_mm_median']),
+            'observations': int(c['observations']),
+            'confidence': float(c['confidence_max']),
+            'thumb': thumb,
+        })
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description='포인트클라우드를 측정 가능한 HTML 뷰어로')
     ap.add_argument('--cloud', required=True, help='입력 .ply')
@@ -99,6 +153,8 @@ def main():
                     help='다운샘플 격자(기본 11mm). 웹에서 돌릴 크기로 줄이는 용도 — '
                          '너무 촘촘하면 base64가 아티팩트 한도(16MB)를 넘는다')
     ap.add_argument('--title', default='포인트클라우드 스캔')
+    ap.add_argument('--cracks', help='detect_cracks_offline.py가 만든 cracks.json — '
+                                     '탐지된 결함을 3D 위에 표시한다')
     ap.add_argument('--stats', help='패널에 넣을 스캔별 수치 JSON '
                                     '([{"title":"촬영","rows":[["해상도","1280x720",""]]}])')
     ap.add_argument('--crop-radius-m', type=float,
@@ -140,6 +196,15 @@ def main():
 
     traj = traj_raw if traj_raw is not None else np.zeros((0, 3), dtype=np.float32)
 
+    cracks = load_cracks(args.cracks, os.path.dirname(os.path.abspath(args.cracks))
+                         if args.cracks else None)
+    if cracks:
+        # 결함 좌표도 점구름과 같은 보기 좌표계로 옮긴다
+        cp = to_view_frame(np.array([c['pos'] for c in cracks], dtype=np.float32))
+        for c, p in zip(cracks, cp):
+            c['pos'] = [float(v) for v in p]
+        print('  결함 %d건 표시' % len(cracks))
+
     lo = xyz.min(0) if not len(traj) else np.minimum(xyz.min(0), traj.min(0))
     hi = xyz.max(0) if not len(traj) else np.maximum(xyz.max(0), traj.max(0))
     rng = hi - lo
@@ -155,7 +220,7 @@ def main():
     meta = dict(n=int(len(xyz)), lo=[float(v) for v in lo],
                 rng=[float(v) for v in rng], nTraj=int(len(traj)),
                 nOrig=int(n_orig), voxelMm=args.voxel_mm, title=args.title,
-                stats=stats)
+                stats=stats, cracks=cracks)
 
     html = (TEMPLATE
             .replace('__TITLE__', args.title)
@@ -176,7 +241,7 @@ TEMPLATE = r'''<title>__TITLE__</title>
 <style>
   :root{
     --ground:#0d1214; --panel:#141d20; --panel-2:#192427; --line:#253438;
-    --ink:#dce6e8; --muted:#7f9296; --accent:#5bc8b5; --warm:#e0904d; --rule:#f4f9fa;
+    --ink:#dce6e8; --muted:#7f9296; --accent:#5bc8b5; --warm:#e0904d; --crack:#f2655f; --rule:#f4f9fa;
     --sans:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
     --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
   }
@@ -249,6 +314,22 @@ TEMPLATE = r'''<title>__TITLE__</title>
   #autoList .k{color:var(--accent)}
   #autoList .v{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums}
   .tag.auto{border-color:var(--accent)}
+  /* 결함 — 측정(흰색)·궤적(주황)과 구분되는 색 */
+  .tag.crack{border-color:var(--crack)}
+  .tag.crack b{color:var(--crack)}
+  #crackList{list-style:none;margin:0 0 10px;padding:0;display:flex;flex-direction:column;gap:5px}
+  #crackList li{display:flex;align-items:baseline;gap:8px;padding:5px 8px;cursor:pointer;
+    background:var(--panel-2);border-left:2px solid var(--crack);border-radius:0 3px 3px 0;
+    font-size:11px;transition:background .12s}
+  #crackList li:hover,#crackList li.sel{background:#22313a}
+  #crackList .cid{font-family:var(--mono);color:var(--crack);font-weight:500}
+  #crackList .csz{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  #crackList .cob{color:var(--muted);font-family:var(--mono);font-size:9.5px}
+  #crackCard{margin:0 0 10px;background:var(--panel-2);border-radius:3px;padding:8px;
+    display:flex;flex-direction:column;gap:6px}
+  #crackCard img{width:100%;border-radius:2px;display:block;background:#000}
+  #crackCap{font-size:10.5px;color:var(--muted);font-family:var(--mono);
+    font-variant-numeric:tabular-nums}
   #profile{margin:0 0 10px;padding:8px 9px;background:var(--panel-2);border-radius:3px}
   #profCap{font-size:10.5px;color:var(--muted);margin-bottom:4px}
   #profSvg{display:block;width:100%;height:auto}
@@ -306,6 +387,18 @@ TEMPLATE = r'''<title>__TITLE__</title>
     <h1 id="docTitle">스캔</h1>
     <p class="sub">D455F로 촬영한 프레임을 사진 기반 포즈 추정(SfM)과 depth 측정으로 3D 복원한 결과.</p>
   </header>
+
+  <div class="grp" id="crackGrp" hidden>
+    <p class="eyebrow">탐지된 결함</p>
+    <ul id="crackList"></ul>
+    <figure id="crackCard" hidden>
+      <img id="crackImg" alt="결함 증거 사진">
+      <figcaption id="crackCap"></figcaption>
+    </figure>
+    <p class="note">모델은 "가늘고 어두운 선"에 반응하므로 <b>신뢰도만으로 진짜와
+      헛탐지를 구분할 수 없습니다</b> — 균열이 전혀 없는 장면에서도 후보가 나온 적이
+      있습니다(케이블·포스터 무늬). 사진으로 확인하세요.</p>
+  </div>
 
   <div class="grp">
     <p class="eyebrow">거리 재기</p>
@@ -495,6 +588,68 @@ TEMPLATE = r'''<title>__TITLE__</title>
 
   var autoDots = [], autoTags = [];
   var autoDots = [], autoTags = [];
+
+  // ---- 탐지된 결함 표시 ----
+  // 2D 사진에서 찾아 mm로 잰 결함을, SLAM/SfM 포즈로 옮긴 3D 위치에 찍는다.
+  // **여기 보이는 건 위치 표시지 3D로 측정한 형상이 아니다** — 얕은 결함은 depth
+  // 노이즈에 묻혀 형상으로는 남지 않는다(2026-09-14 실측).
+  var crackMarks = [], crackTags = [], crackSel = -1;
+  (function drawCracks(){
+    var cs = META.cracks || [];
+    if (!cs.length) return;
+    document.getElementById('crackGrp').hidden = false;
+    var list = document.getElementById('crackList');
+    var mat2 = new THREE.MeshBasicMaterial({color:0xf2655f});
+    var ring = new THREE.LineBasicMaterial({color:0xf2655f});
+    var sph = new THREE.SphereGeometry(1, 14, 10);
+
+    cs.forEach(function(c, i){
+      var p = new THREE.Vector3(c.pos[0]-cx, c.pos[1]-cy, c.pos[2]-cz);
+      var m = new THREE.Mesh(sph, mat2);
+      m.position.copy(p); m.scale.setScalar(0.01);
+      scene.add(m);
+      // 점구름 안에 묻혀도 찾을 수 있도록 위로 뻗는 핀을 하나 세운다
+      var pin = new THREE.Line(new THREE.BufferGeometry().setFromPoints(
+        [p, p.clone().add(new THREE.Vector3(0, 0.08, 0))]), ring);
+      scene.add(pin);
+      crackMarks.push({mesh:m, pin:pin, pos:p, data:c});
+
+      var el = document.createElement('div');
+      el.className = 'tag crack';
+      el.innerHTML = '<b>'+c.id+'</b><span>'+c.length_mm.toFixed(0)+' × '
+                   + c.width_mm.toFixed(0)+' mm</span>';
+      labels.appendChild(el);
+      crackTags.push({pos:p, el:el});
+
+      var li = document.createElement('li');
+      li.innerHTML = '<span class="cid">'+c.id+'</span>'
+                   + '<span class="cob">'+c.observations+'회</span>'
+                   + '<span class="csz">'+c.length_mm.toFixed(0)+'×'+c.width_mm.toFixed(0)+' mm</span>';
+      li.onclick = function(){ focusCrack(i); };
+      list.appendChild(li);
+    });
+  })();
+
+  function focusCrack(i){
+    var c = crackMarks[i]; if (!c) return;
+    crackSel = i;
+    var items = document.getElementById('crackList').children;
+    for (var k=0;k<items.length;k++) items[k].className = (k===i ? 'sel' : '');
+    // 카메라를 그 결함으로 이동 — 각도는 유지한 채 대상만 바꾼다
+    target.copy(c.pos);
+    st.r = Math.min(st.r, 0.6);
+    applyCam();
+    var card = document.getElementById('crackCard');
+    var img = document.getElementById('crackImg');
+    if (c.data.thumb){
+      img.src = 'data:image/jpeg;base64,' + c.data.thumb;
+      img.style.display = '';
+    } else { img.style.display = 'none'; }
+    document.getElementById('crackCap').textContent =
+      c.data.id + ' · ' + c.data.length_mm.toFixed(0) + ' × ' + c.data.width_mm.toFixed(0)
+      + ' mm · 신뢰도 ' + c.data.confidence.toFixed(2) + ' · ' + c.data.observations + '회 관측';
+    card.hidden = false;
+  }
 
   // ---- 단면 보기 ----
   // 결함을 가로지르는 두 점을 대충 찍으면, 그 선을 따라 표면이 어떻게 파였는지
@@ -957,6 +1112,14 @@ TEMPLATE = r'''<title>__TITLE__</title>
     if (pending) pending.dot.scale.setScalar(s);
     // 거리 라벨을 선 중점의 화면 좌표에 붙인다
     var w = stage.clientWidth, h = stage.clientHeight;
+    crackTags.forEach(function(m){
+      mid.copy(m.pos).project(camera);
+      if (mid.z > 1){ m.el.style.display='none'; return; }
+      m.el.style.display='';
+      m.el.style.left = ((mid.x*0.5+0.5)*w)+'px';
+      m.el.style.top  = ((-mid.y*0.5+0.5)*h - 22)+'px';
+    });
+    crackMarks.forEach(function(c){ c.mesh.scale.setScalar(Math.max(0.006, st.r*0.012)); });
     autoTags.forEach(function(m){
       mid.copy(m.a).add(m.b).multiplyScalar(0.5).project(camera);
       if (mid.z > 1){ m.el.style.display='none'; return; }
