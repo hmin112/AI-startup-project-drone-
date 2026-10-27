@@ -10,25 +10,44 @@
 # 훨씬 빨랐고(16초), COLMAP도 Mac에 설치돼 있다.
 #
 # 사용법:
-#   ./process_scan.sh ~/frames/scan1                 # 이미 추출된 프레임으로
-#   ./process_scan.sh ~/frames/scan1 --viewer         # 3D 뷰어도 함께 생성
+#   ./process_scan.sh ~/bags/scan1 --viewer           # bag부터 통째로
+#   ./process_scan.sh ~/frames/scan1 --viewer         # 이미 추출된 프레임으로
 #
-# 프레임 추출은 ROS가 필요해 젯슨에서 따로 해야 한다(scripts/extract_frames.py).
-# 추출된 디렉토리를 Mac으로 가져온 뒤 이 스크립트를 돌린다.
+# **bag을 직접 넣을 수 있다 — 젯슨이 필요 없다.** 예전엔 추출만 ROS가 있어야 해서
+# 젯슨에서 `ros2 bag play`를 돌리고 결과를 내려받아야 했는데, 2026-10-27부터
+# scripts/read_bag.py가 bag을 직접 읽는다. 같은 프레임이 나오는 것은 픽셀 단위로
+# 확인했고(desk_scan_1, depth는 바이트까지 동일), 재생이 아니라 파일 읽기라
+# 90초짜리 스캔이 11초면 끝난다. OUT=~/frames/이름 으로 추출 위치를 지정할 수 있다.
 
 set -uo pipefail
 
-FRAMES="${1:?사용법: process_scan.sh <frames 디렉토리> [--viewer]}"
+INPUT="${1:?사용법: process_scan.sh <bag 또는 frames 디렉토리> [--viewer]}"
 shift || true
 MAKE_VIEWER=0
 for a in "$@"; do [ "$a" = "--viewer" ] && MAKE_VIEWER=1; done
 
 WS="$(cd "$(dirname "$0")/.." && pwd)"
-SCAN="$(basename "${FRAMES%/}")"
+SCAN="$(basename "${INPUT%/}")"
+SCAN="${SCAN%.db3}"
+
+# bag이면 먼저 프레임으로 푼다. 이미 푼 프레임 디렉토리면 그대로 쓴다.
+if [ -f "$INPUT" ] || compgen -G "$INPUT/*.db3" > /dev/null 2>&1; then
+  FRAMES="${OUT:-$HOME/frames/$SCAN}"
+  if [ -d "$FRAMES/images" ]; then
+    echo "[0/4] 추출 — $FRAMES 에 이미 있어 건너뜀 (다시 하려면 디렉토리 삭제)"
+  else
+    echo "[0/4] bag 읽기 — $INPUT → $FRAMES"
+    "$WS/scripts/read_bag.py" "$INPUT" --out "$FRAMES" \
+      ${MIN_DIST:+--min-dist "$MIN_DIST"} ${MAX_DIST:+--max-dist "$MAX_DIST"} \
+      || { echo "bag 읽기 실패" >&2; exit 1; }
+  fi
+else
+  FRAMES="$INPUT"
+fi
 MODEL="${MODEL:-$WS/models/crack_seg_v3_combined_finetune.pt}"
 CONF="${CONF:-0.25}"
 
-[ -d "$FRAMES/images" ] || { echo "에러: $FRAMES/images 가 없다 — extract_frames.py 출력 디렉토리를 지정할 것" >&2; exit 1; }
+[ -d "$FRAMES/images" ] || { echo "에러: $FRAMES/images 가 없다 — bag 또는 추출된 프레임 디렉토리를 지정할 것" >&2; exit 1; }
 [ -f "$MODEL" ] || { echo "에러: 모델을 찾을 수 없다 — $MODEL" >&2; exit 1; }
 
 echo "=============================================="
@@ -77,6 +96,7 @@ if [ "$MAKE_VIEWER" = "1" ]; then
   echo "      3D 뷰어도 생성 중..."
   "$WS/scripts/make_viewer.py" --cloud "$FRAMES/cloud.ply" \
     --poses "$POSES" --scale "$SCALE" --title "$SCAN" \
+    --cracks "$FRAMES/cracks.json" \
     --out "$FRAMES/viewer.html" && VIEWER_URL="viewer.html"
 fi
 if [ -n "$VIEWER_URL" ]; then
